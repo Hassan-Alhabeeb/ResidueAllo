@@ -1,0 +1,54 @@
+# ===== Phase 0 leftovers (abandoned docking project) =====
+prepare_docking.py
+prepare_docking_v2.py
+simplify_pocket.py
+run_vina.ps1
+run_vina_simplified.ps1
+downloads/
+
+# ===== System artifacts =====
+nul
+.*
+!.gitignore
+.playwright-mcp/
+.claude/
+__pycache__/
+*.pyc
+find_large.ps1
+
+# ===== Debug scripts (not core pipeline) =====
+allosteric/scripts/debug_fpocket.py
+allosteric/scripts/debug_fpocket2.sh
+allosteric/scripts/debug_fpocket3.py
+allosteric/scripts/debug_fpocket4.py
+
+# ===== Heavy data (regenerable from pipeline) =====
+# Raw downloaded datasets
+allosteric/data/raw/
+allosteric/data/pdb_files/
+allosteric/data/casbench/features/
+allosteric/data/casbench/labels/
+allosteric/data/casbench/predictions/
+allosteric/data/processed/
+
+# Pre-computed features (regenerable)
+allosteric/features/
+
+# HDF5 datasets (built by build_dataset.py)
+allosteric/models/*.h5
+
+# Kaggle downloads & embeddings
+allosteric/kaggle/
+
+# PCA/scaler objects (small but regenerable, keep models only)
+allosteric/models/*.joblib
+
+# Optuna database
+allosteric/results/*.db
+
+# Tool binaries
+allosteric/tools/
+
+# Log files
+allosteric/results/logs/
+*.log

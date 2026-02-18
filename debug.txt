@@ -1,0 +1,169 @@
+  Optimal threshold (from val F1): 0.4095
+
+======================================================================
+  Final Evaluation
+======================================================================
+
+  TRAIN (n=1,331,245, pos=22,181, threshold=0.410)
+  ---------------------------------------------
+    AUROC:     0.9802
+    AUPRC:     0.7054
+    Precision: 0.5175
+    Recall:    0.7714
+    F1:        0.6195
+    MCC:       0.6245
+    TN=1,293,113  FP=15,951
+    FN=  5,070  TP=17,111
+
+  VAL (n=176,094, pos=3,241, threshold=0.410)
+  ---------------------------------------------
+    AUROC:     0.9130
+    AUPRC:     0.2159
+    Precision: 0.2920
+    Recall:    0.3928
+    F1:        0.3350
+    MCC:       0.3243
+    TN=169,767  FP= 3,086
+    FN=  1,968  TP= 1,273
+
+  TEST (n=189,055, pos=3,155, threshold=0.410)
+  ---------------------------------------------
+    AUROC:     0.9062
+    AUPRC:     0.2225
+    Precision: 0.2399
+    Recall:    0.4152
+    F1:        0.3041
+    MCC:       0.3005
+    TN=181,749  FP= 4,151
+    FN=  1,845  TP= 1,310
+
+  ---------------------------------------------
+  Overfitting gap: 0.074 (train 0.9802 - test 0.9062)
+  Previous best:   Test AUROC 0.895 | Test AUPRC 0.214
+  This model:      Test AUROC 0.906 | Test AUPRC 0.223
+  Delta:           AUROC +0.011 | AUPRC +0.009
+
+======================================================================
+  Top 20 Feature Importances
+======================================================================
+    1. pocket_score                  : 0.2098 #########################################
+    2. pocket_rank                   : 0.0496 #########
+    3. seqpos                        : 0.0228 ####
+    4. pocket_hydrophobicity         : 0.0187 ###
+    5. pocket_druggability           : 0.0146 ##
+    6. closeness_centrality          : 0.0090 #
+    7. seqpos_normalized             : 0.0070 #
+    8. esm_pca_75                    : 0.0067 #
+    9. dist_to_centroid              : 0.0066 #
+   10. pocket_polarity               : 0.0061 #
+   11. dssp_E                        : 0.0059 #
+   12. sasa_rel                      : 0.0059 #
+   13. neighbor_CYS                  : 0.0058 #
+   14. neighbor_ASP                  : 0.0058 #
+   15. aa_ASN                        : 0.0057 #
+   16. pagerank                      : 0.0057 #
+   17. degree_centrality             : 0.0055 #
+   18. esm_pca_23                    : 0.0055 #
+   19. neighbor_ALA                  : 0.0052 #
+   20. esm_pca_11                    : 0.0050 #
+
+  NMA/graph features in top 20: 3/11
+
+======================================================================
+  Saving Results
+======================================================================
+  Model:   E:\newyear\research_plan\allosteric\models\xgboost_tuned.json (7.8 MB)
+  Results: E:\newyear\research_plan\allosteric\results\xgboost_tuned_results.json
+  Trials:  E:\newyear\research_plan\allosteric\results\optuna_trials.json
+
+======================================================================
+  DONE!
+======================================================================
+
+E:\newyear\research_plan\allosteric>python scripts/evaluate_casbench.py --phase predict
+[LOG] Logging to: E:\newyear\research_plan\allosteric\results\logs\casbench_predict_20260218_230026.log
+[LOG] Phase: predict | Started: 2026-02-18 23:00:26
+============================================================
+  Phase 6: Prediction & Evaluation
+============================================================
+  Loading model artifacts...
+  Model expects: 217 features
+  Scaler expects: 89 structural features
+  PCA expects: 1280 -> 128 ESM features
+  AAindex: included in scaler (89 = 64+11+8+6)
+  Threshold (from training): 0.3512
+
+  Evaluating 2374 independent CASBench proteins...
+
+  Processed: 2370 ok, 0 failed, 4 missing features
+
+============================================================
+  AGGREGATE RESULTS (CASBench Blind Test)
+============================================================
+  Total residues: 1,962,252
+  Allosteric:     86,979 (4.43%)
+  Proteins:       2370
+
+  Threshold: 0.3512
+  AUROC:     0.7504
+  AUPRC:     0.1896
+  Precision: 0.2849
+  Recall:    0.1702
+  F1:        0.2131
+  MCC:       0.1928
+  Confusion Matrix:
+    TN=1,838,098  FP=  37,175
+    FN=  72,171  TP=  14,808
+
+  Random baseline AUPRC: 0.0443
+  AUPRC lift over random: 4.3x
+
+  Per-protein metrics (2361 proteins with both classes):
+    AUROC: mean=0.6674, median=0.6675, std=0.1740
+    AUPRC: mean=0.2145, median=0.1185, std=0.2116
+
+  Saved: E:\newyear\research_plan\allosteric\results\casbench_per_protein.csv
+
+  Per-family metrics (83 families with both classes):
+    AUROC: mean=0.7016, median=0.6989
+    AUPRC: mean=0.1514, median=0.0746
+
+  Top 5 families by AUROC:
+    cas0088: AUROC=0.965, AUPRC=0.104 (9 proteins, 32 allo)
+    cas0048: AUROC=0.948, AUPRC=0.446 (1 proteins, 20 allo)
+    cas0018: AUROC=0.924, AUPRC=0.696 (7 proteins, 196 allo)
+    cas0086: AUROC=0.913, AUPRC=0.423 (40 proteins, 1496 allo)
+    cas0045: AUROC=0.899, AUPRC=0.566 (1 proteins, 88 allo)
+  Bottom 5 families by AUROC:
+    cas0079: AUROC=0.487, AUPRC=0.051 (141 proteins, 2626 allo)
+    cas0040: AUROC=0.476, AUPRC=0.043 (3 proteins, 180 allo)
+    cas0035: AUROC=0.473, AUPRC=0.024 (5 proteins, 161 allo)
+    cas0024: AUROC=0.443, AUPRC=0.003 (35 proteins, 128 allo)
+    cas0078: AUROC=0.340, AUPRC=0.027 (32 proteins, 840 allo)
+
+  Saved: E:\newyear\research_plan\allosteric\results\casbench_per_family.csv
+
+============================================================
+  HOMOLOGY-STRATIFIED RESULTS
+============================================================
+
+  Label                  Proteins   Residues    AUROC    AUPRC      MCC       F1
+  --------------------------------------------------------------------------
+  All independent            2370  1,962,252   0.7504   0.1896   0.1928   0.2131
+  <70% identity               406    475,310   0.7913   0.1604   0.2036   0.2160
+  <50% identity               382    403,432   0.7813   0.1646   0.2025   0.2184
+  <30% identity               261    245,248   0.7887   0.2181   0.2476   0.2625
+
+  Identity distribution of evaluated proteins:
+    [0%, 30%): 261 proteins
+    [30%, 50%): 121 proteins
+    [50%, 70%): 24 proteins
+    [70%, 90%): 198 proteins
+    [90%, 100%]: 1766 proteins
+
+  Saved: E:\newyear\research_plan\allosteric\results\casbench_evaluation.json
+
+============================================================
+  CASBench Blind Evaluation Complete
+============================================================
+[LOG] Finished: 2026-02-18 23:04:30
