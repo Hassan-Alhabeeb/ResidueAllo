@@ -6,10 +6,10 @@ Residue-level allosteric site prediction using XGBoost with hybrid structural, d
 
 | Metric | Test Set | CASBench (blind) | CASBench <30% identity |
 |--------|----------|-------------------|------------------------|
-| AUROC | 0.926 | 0.750 | 0.789 |
-| AUPRC | 0.401 (23.6x random) | 0.190 (4.3x random) | 0.218 |
-| MCC | 0.452 | 0.193 | - |
-| F1 | 0.461 | - | - |
+| AUROC | 0.926 | Pending | Pending |
+| AUPRC | 0.401 (23.6x random) | Pending | Pending |
+| MCC | 0.452 | Pending | Pending |
+| F1 | 0.461 | Pending | Pending |
 
 ## Features (225 per residue)
 
