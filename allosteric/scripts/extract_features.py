@@ -27,6 +27,7 @@ Other fixes from Opus review:
 
 import os
 import sys
+import re
 import numpy as np
 import pandas as pd
 from Bio.PDB import PDBParser
@@ -42,7 +43,8 @@ except ImportError:
     HAS_FREESASA = False
     print("WARNING: freesasa not available. SASA features will be NaN.")
 
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PDB_DIR = os.path.join(DATA_DIR, "pdb_files")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 FEATURES_DIR = os.path.join(DATA_DIR, "..", "features")
@@ -108,7 +110,7 @@ def get_ca_coords(residues):
                 pos = np.mean([a.get_vector().get_array() for a in atoms], axis=0)
                 coords.append(pos)
             else:
-                coords.append(np.array([0.0, 0.0, 0.0]))
+                coords.append(np.array([99999.0, 99999.0, 99999.0]))
             has_ca.append(False)
     return np.array(coords), has_ca
 
@@ -148,10 +150,10 @@ def extract_sasa(structure, residues, res_info):
         for i in range(fs_structure.nAtoms()):
             chain_id = fs_structure.chainLabel(i)
             resnum_str = fs_structure.residueNumber(i)
-            try:
-                resnum = int(resnum_str.strip())
-            except ValueError:
+            m = re.match(r'-?\d+', resnum_str.strip())
+            if not m:
                 continue
+            resnum = int(m.group())
             key = (chain_id, resnum)
             if key not in residue_atoms:
                 residue_atoms[key] = []
@@ -275,7 +277,9 @@ def extract_physicochemical(res_info):
 
 
 def extract_position_features(ca_coords, res_info):
-    """Position features — RAW values (no per-protein z-score)."""
+    """Position features — RAW values (no per-protein z-score).
+    Sequential index and normalized position are per-chain to avoid
+    cross-chain positional leakage in multi-chain complexes."""
     n = len(ca_coords)
     features = np.zeros((n, 3))
 
@@ -283,13 +287,23 @@ def extract_position_features(ca_coords, res_info):
     centroid = ca_coords.mean(axis=0)
     features[:, 0] = np.sqrt(np.sum((ca_coords - centroid)**2, axis=1))
 
-    # Sequential index (NOT PDB resnum — avoid author-specific numbering)
-    for i in range(n):
-        features[i, 1] = i
+    # Per-chain sequential index and normalized position
+    chain_lengths = {}
+    for info in res_info:
+        chain_lengths[info['chain']] = chain_lengths.get(info['chain'], 0) + 1
 
-    # Normalized position [0, 1]
+    current_chain = None
+    chain_idx = 0
+
     for i in range(n):
-        features[i, 2] = i / max(n - 1, 1)
+        chain = res_info[i]['chain']
+        if chain != current_chain:
+            current_chain = chain
+            chain_idx = 0
+
+        features[i, 1] = chain_idx
+        features[i, 2] = chain_idx / max(chain_lengths[chain] - 1, 1)
+        chain_idx += 1
 
     return features
 
@@ -310,15 +324,21 @@ def extract_packing_geometry(ca_coords, dist_matrix, res_info):
             directions = ca_coords[neighbor_indices] - ca_coords[i]
 
             # Chain-aware direction: only use adjacent residues in SAME chain
-            chain_dir = np.array([0.0, 0.0, 1.0])  # fallback
-            if i > 0 and i < n - 1:
-                if chain_ids[i-1] == chain_ids[i] == chain_ids[i+1]:
-                    chain_dir = ca_coords[i+1] - ca_coords[i-1]
-                    norm = np.linalg.norm(chain_dir)
-                    if norm > 1e-8:
-                        chain_dir = chain_dir / norm
-                    else:
-                        chain_dir = np.array([0.0, 0.0, 1.0])
+            chain_dir = np.array([0.0, 0.0, 1.0])  # fallback for single-residue chains
+            if i > 0 and i < n - 1 and chain_ids[i-1] == chain_ids[i] == chain_ids[i+1]:
+                # Interior residue: use i-1 to i+1 direction
+                chain_dir = ca_coords[i+1] - ca_coords[i-1]
+            elif i < n - 1 and chain_ids[i] == chain_ids[i+1]:
+                # N-terminus: use i to i+1 direction
+                chain_dir = ca_coords[i+1] - ca_coords[i]
+            elif i > 0 and chain_ids[i-1] == chain_ids[i]:
+                # C-terminus: use i-1 to i direction
+                chain_dir = ca_coords[i] - ca_coords[i-1]
+            norm = np.linalg.norm(chain_dir)
+            if norm > 1e-8:
+                chain_dir = chain_dir / norm
+            else:
+                chain_dir = np.array([0.0, 0.0, 1.0])
 
             dots = np.dot(directions, chain_dir)
             features[i, 0] = np.sum(dots > 0)   # HSE up (raw count)
@@ -382,9 +402,9 @@ def extract_all_features(pdb_id, pdb_path):
     res_info = []
     for chain in model:
         for residue in chain:
-            if residue.id[0] != ' ':
-                continue
             resname = residue.get_resname()
+            if residue.id[0] != ' ' and resname not in NONSTANDARD_MAP:
+                continue
 
             # Map non-standard to standard
             if resname in NONSTANDARD_MAP:
@@ -451,87 +471,129 @@ FEATURE_NAMES = (
 )
 
 
-if __name__ == '__main__':
+def process_single_protein(args):
+    """Process a single protein — designed for multiprocessing Pool."""
+    pdb_id, pdb_path, label_path, feat_path = args
+
+    if os.path.exists(feat_path):
+        return pdb_id, 'skipped', None
+
+    if not os.path.exists(pdb_path):
+        return pdb_id, 'failed', 'no PDB file'
+
+    if not os.path.exists(label_path):
+        return pdb_id, 'failed', 'no label file'
+
+    try:
+        features, res_info = extract_all_features(pdb_id, pdb_path)
+        if features is None:
+            return pdb_id, 'failed', 'no residues'
+
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
+
+        # Align features with labels by (chain, resnum)
+        feat_lookup = {}
+        for i, info in enumerate(res_info):
+            key = (info['chain'], info['resnum'])
+            feat_lookup[key] = i
+
+        aligned_features = []
+        aligned_labels = []
+        n_matched = 0
+        for _, lrow in labels_df.iterrows():
+            key = (lrow['chain'], lrow['resnum'])
+            if key in feat_lookup:
+                aligned_features.append(features[feat_lookup[key]])
+                n_matched += 1
+            else:
+                aligned_features.append(np.zeros(len(FEATURE_NAMES), dtype=np.float32))
+            aligned_labels.append(lrow['is_allosteric'])
+
+        if len(aligned_features) == 0:
+            return pdb_id, 'failed', 'no alignment'
+
+        # Warn on low match rate
+        match_rate = n_matched / len(labels_df)
+        if match_rate < 0.90:
+            print(f"  WARNING: {pdb_id} matched only {match_rate:.1%} of label residues (rest zero-padded)")
+
+        aligned_features = np.array(aligned_features)
+        aligned_labels = np.array(aligned_labels)
+
+        np.savez_compressed(feat_path,
+                            features=aligned_features,
+                            labels=aligned_labels,
+                            pdb_id=pdb_id,
+                            feature_names=FEATURE_NAMES)
+
+        return pdb_id, 'success', f'{len(aligned_labels)} res'
+
+    except Exception as e:
+        return pdb_id, 'failed', str(e)
+
+
+def main():
+    import time
+    from multiprocessing import Pool, cpu_count
+
     summary = pd.read_csv(os.path.join(PROCESSED_DIR, "dataset_summary.csv"))
     print(f"Proteins to process: {len(summary)}")
     print(f"Feature dimensions: {len(FEATURE_NAMES)}")
 
+    tasks = []
+    for _, row in summary.iterrows():
+        pdb_id = row['pdb_id']
+        pdb_path = os.path.join(PDB_DIR, f"{pdb_id}.pdb")
+        label_path = os.path.join(PROCESSED_DIR, f"{pdb_id}_labels.csv")
+        feat_path = os.path.join(FEATURES_DIR, f"{pdb_id}_features.npz")
+        tasks.append((pdb_id, pdb_path, label_path, feat_path))
+
+    n_existing = sum(1 for _, _, _, fp in tasks if os.path.exists(fp))
+    if n_existing > 0:
+        print(f"  Already done: {n_existing} (will skip)")
+
+    # Use physical cores only; cap at 48
+    n_workers = min(max(1, cpu_count() - 2), 48)
+    print(f"  Workers: {n_workers}")
+    print(f"  Total tasks: {len(tasks)}\n")
+
+    start_time = time.time()
     newly_processed = 0
     already_done = 0
     failed = 0
+    errors = []
 
-    for idx, row in summary.iterrows():
-        pdb_id = row['pdb_id']
-        pdb_path = os.path.join(PDB_DIR, f"{pdb_id}.pdb")
-
-        if not os.path.exists(pdb_path):
-            continue
-
-        feat_path = os.path.join(FEATURES_DIR, f"{pdb_id}_features.npz")
-        if os.path.exists(feat_path):
-            already_done += 1
-            continue
-
-        try:
-            features, res_info = extract_all_features(pdb_id, pdb_path)
-            if features is None:
+    with Pool(processes=n_workers) as pool:
+        for result in pool.imap_unordered(process_single_protein, tasks, chunksize=4):
+            pdb_id, status, msg = result
+            if status == 'success':
+                newly_processed += 1
+                if newly_processed % 50 == 0:
+                    elapsed = time.time() - start_time
+                    rate = newly_processed / elapsed
+                    remaining = (len(tasks) - newly_processed - already_done - failed) / max(rate, 0.01)
+                    print(f"  Processed {newly_processed} proteins ({elapsed:.0f}s, ~{remaining:.0f}s remaining)")
+            elif status == 'skipped':
+                already_done += 1
+            else:
                 failed += 1
-                continue
+                if len(errors) < 5:
+                    errors.append(f"{pdb_id}: {msg}")
 
-            label_path = os.path.join(PROCESSED_DIR, f"{pdb_id}_labels.csv")
-            if not os.path.exists(label_path):
-                failed += 1
-                continue
-
-            labels_df = pd.read_csv(label_path)
-
-            # Align features with labels by (chain, resnum)
-            feat_lookup = {}
-            for i, info in enumerate(res_info):
-                key = (info['chain'], info['resnum'])
-                feat_lookup[key] = i
-
-            aligned_features = []
-            aligned_labels = []
-            for _, lrow in labels_df.iterrows():
-                key = (lrow['chain'], lrow['resnum'])
-                if key in feat_lookup:
-                    aligned_features.append(features[feat_lookup[key]])
-                    aligned_labels.append(lrow['is_allosteric'])
-
-            if len(aligned_features) == 0:
-                failed += 1
-                continue
-
-            # Warn on low match rate
-            match_rate = len(aligned_features) / len(labels_df)
-            if match_rate < 0.90:
-                print(f"  WARNING: {pdb_id} matched only {match_rate:.1%} of label residues")
-
-            aligned_features = np.array(aligned_features)
-            aligned_labels = np.array(aligned_labels)
-
-            np.savez_compressed(feat_path,
-                                features=aligned_features,
-                                labels=aligned_labels,
-                                pdb_id=pdb_id,
-                                feature_names=FEATURE_NAMES)
-
-            newly_processed += 1
-            if newly_processed % 50 == 0:
-                print(f"  Newly processed {newly_processed} proteins (skipped {already_done} existing)...")
-
-        except Exception as e:
-            failed += 1
-            if failed <= 5:
-                print(f"  ERROR on {pdb_id}: {e}")
-                traceback.print_exc()
-
+    elapsed = time.time() - start_time
     print(f"\n{'='*60}")
-    print(f"Feature extraction complete")
+    print(f"Feature extraction complete ({elapsed:.0f}s)")
     print(f"  Newly processed: {newly_processed}")
     print(f"  Already done: {already_done}")
     print(f"  Failed: {failed}")
     print(f"  Feature dim: {len(FEATURE_NAMES)}")
     print(f"  Output dir: {FEATURES_DIR}")
+    if errors:
+        print(f"  First errors:")
+        for e in errors:
+            print(f"    {e}")
     print(f"{'='*60}")
+
+
+if __name__ == '__main__':
+    main()

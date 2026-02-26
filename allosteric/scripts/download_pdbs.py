@@ -9,7 +9,8 @@ import urllib.request
 import time
 import sys
 
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PDB_DIR = os.path.join(DATA_DIR, "pdb_files")
 CSV_PATH = os.path.join(DATA_DIR, "raw", "allobench", "AlloBench.csv")
 

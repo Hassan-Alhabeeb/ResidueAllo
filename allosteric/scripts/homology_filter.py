@@ -25,11 +25,17 @@ import time
 warnings.filterwarnings('ignore')
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = r"E:\newyear\research_plan\allosteric"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
 CASBENCH_DIR = os.path.join(BASE_DIR, "data", "casbench")
 CASBENCH_CSV = os.path.join(CASBENCH_DIR, "casbench_independent_pdbs.csv")
 TRAINING_FASTA = os.path.join(BASE_DIR, "data", "processed", "all_sequences.fasta")
-MMSEQS_BAT = os.path.join(BASE_DIR, "tools", "mmseqs", "mmseqs", "mmseqs.bat")
+import platform
+import shutil
+if platform.system() == 'Linux':
+    # Use system-installed mmseqs on Linux
+    MMSEQS_BAT = shutil.which('mmseqs') or 'mmseqs'
+else:
+    MMSEQS_BAT = os.path.join(BASE_DIR, "tools", "mmseqs", "mmseqs", "mmseqs.bat")
 OUTPUT_CSV = os.path.join(CASBENCH_DIR, "casbench_homology.csv")
 
 # ── AA mappings (same as all other scripts) ──────────────────────────────────
@@ -62,9 +68,9 @@ def get_chain_sequences(pdb_path):
     for chain in model:
         residues = []
         for res in chain:
-            if res.id[0] != ' ':
-                continue
             resname = res.get_resname()
+            if res.id[0] != ' ' and resname not in NONSTANDARD_MAP:
+                continue
             if resname in NONSTANDARD_MAP:
                 resname = NONSTANDARD_MAP[resname]
             if resname not in AA3TO1:
@@ -169,13 +175,15 @@ def main():
     # Search: CASBench (query) vs Training (target)
     # --min-seq-id 0.0 to get all hits (we want full identity distribution)
     # -s 7.5 for high sensitivity
-    # --max-seqs 1 to only keep the best hit per query
+    # -c 0.8 --cov-mode 0: require 80% coverage of shorter sequence
+    #   Without this, short local alignments (e.g. a 15-residue helix) can
+    #   report fident=1.0, falsely categorizing novel proteins as high-identity
     cmd = (
         f'"{MMSEQS_BAT}" search "{casbench_db}" "{training_db}" "{result_db}" "{tmp_mmseqs}" '
-        f'--min-seq-id 0.0 -s 7.5 -e 10'
+        f'--min-seq-id 0.0 -s 7.5 -e 10 -c 0.8 --cov-mode 0'
     )
     print(f"    {cmd}")
-    subprocess.run(cmd, shell=True, check=True, capture_output=True, timeout=600)
+    subprocess.run(cmd, shell=True, check=True, capture_output=True, timeout=3600)
 
     # Convert results to TSV
     cmd = (

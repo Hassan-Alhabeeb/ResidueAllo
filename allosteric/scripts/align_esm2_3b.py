@@ -26,11 +26,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 PDB_DIR = os.path.join(DATA_DIR, "pdb_files")
-RAW_ESM3B_DIR = r"E:\newyear\research_plan\allosteric\kaggle\esm2_3b_embeddings"   # Kaggle output (raw, unaligned)
-ESM3B_DIR = r"E:\newyear\research_plan\allosteric\features\esm2_3b_embeddings"      # Aligned output
+RAW_ESM3B_DIR = os.path.join(BASE_DIR, "kaggle", "esm2_3b_embeddings")   # Kaggle output (raw, unaligned)
+ESM3B_DIR = os.path.join(BASE_DIR, "features", "esm2_3b_embeddings")      # Aligned output
 
 ESM_DIM = 2560  # ESM-2 3B hidden dimension
 

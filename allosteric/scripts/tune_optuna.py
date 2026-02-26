@@ -20,8 +20,9 @@ import time
 import logging
 from datetime import datetime
 
-MODEL_DIR = r"E:\newyear\research_plan\allosteric\models"
-RESULTS_DIR = r"E:\newyear\research_plan\allosteric\results"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+RESULTS_DIR = os.path.join(BASE_DIR, "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # Set up dual logging: console + file
@@ -76,7 +77,7 @@ def objective(trial, X_train, y_train, X_val, y_val):
 
     params = {
         'objective': 'binary:logistic',
-        'eval_metric': 'logloss',  # Use logloss for early stopping (proper scoring rule)
+        'eval_metric': 'aucpr',  # Use AUPRC for early stopping (invariant to probability shifts from scale_pos_weight)
         'tree_method': 'hist',
         'random_state': SEED,
 
@@ -388,8 +389,12 @@ def main():
     from extract_nma_graph import ALL_FEATURE_NAMES as NMA_GRAPH_NAMES
     from extract_fpocket import FPOCKET_FEATURE_NAMES
     from extract_aaindex import FEATURE_NAMES as AAINDEX_NAMES
+    from extract_transfer_entropy import TE_FEATURE_NAMES
+    from extract_prs import PRS_FEATURE_NAMES
 
-    all_names = list(FEATURE_NAMES) + list(NMA_GRAPH_NAMES) + list(FPOCKET_FEATURE_NAMES) + list(AAINDEX_NAMES)
+    all_names = (list(FEATURE_NAMES) + list(NMA_GRAPH_NAMES) +
+                 list(FPOCKET_FEATURE_NAMES) + list(AAINDEX_NAMES) +
+                 list(TE_FEATURE_NAMES) + list(PRS_FEATURE_NAMES))
     if n_features > len(all_names):
         n_esm = n_features - len(all_names)
         all_names = all_names + [f"esm_pca_{i}" for i in range(n_esm)]

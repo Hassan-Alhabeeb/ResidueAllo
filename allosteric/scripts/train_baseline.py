@@ -21,9 +21,10 @@ from sklearn.metrics import (
 import json
 import joblib
 
-MODEL_DIR = r"E:\newyear\research_plan\allosteric\models"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 DATASET_PATH = os.path.join(MODEL_DIR, "dataset.h5")
-RESULTS_DIR = r"E:\newyear\research_plan\allosteric\results"
+RESULTS_DIR = os.path.join(BASE_DIR, "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
@@ -194,11 +195,16 @@ if __name__ == '__main__':
     from extract_nma_graph import ALL_FEATURE_NAMES as NMA_GRAPH_NAMES
     from extract_fpocket import FPOCKET_FEATURE_NAMES
     from extract_aaindex import FEATURE_NAMES as AAINDEX_NAMES
+    from extract_transfer_entropy import TE_FEATURE_NAMES
+    from extract_prs import PRS_FEATURE_NAMES
     n_total = data['train']['X'].shape[1]
-    n_struct = len(STRUCT_NAMES) + len(NMA_GRAPH_NAMES) + len(FPOCKET_FEATURE_NAMES) + len(AAINDEX_NAMES)
+    n_struct = (len(STRUCT_NAMES) + len(NMA_GRAPH_NAMES) + len(FPOCKET_FEATURE_NAMES) +
+                len(AAINDEX_NAMES) + len(TE_FEATURE_NAMES) + len(PRS_FEATURE_NAMES))
     n_esm_pca = n_total - n_struct
     esm_pca_names = [f'esm_pca_{i}' for i in range(n_esm_pca)]
-    all_feature_names = list(STRUCT_NAMES) + list(NMA_GRAPH_NAMES) + list(FPOCKET_FEATURE_NAMES) + list(AAINDEX_NAMES) + esm_pca_names
+    all_feature_names = (list(STRUCT_NAMES) + list(NMA_GRAPH_NAMES) +
+                         list(FPOCKET_FEATURE_NAMES) + list(AAINDEX_NAMES) +
+                         list(TE_FEATURE_NAMES) + list(PRS_FEATURE_NAMES) + esm_pca_names)
     top_features = feature_importance(model, all_feature_names)
 
     results = {

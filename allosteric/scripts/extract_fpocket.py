@@ -1,8 +1,8 @@
 """
 Extract FPocket features for all proteins.
 
-Runs FPocket via WSL on each PDB file, parses pocket info and residue mappings,
-and produces per-residue features:
+Runs FPocket natively on Linux (or via WSL on Windows) on each PDB file,
+parses pocket info and residue mappings, and produces per-residue features:
 
 FPocket Features (8-dim):
   1. is_in_pocket (binary)
@@ -14,7 +14,8 @@ FPocket Features (8-dim):
   7. pocket_rank (rank of best pocket, 1=top, normalized by total pockets)
   8. n_pockets (number of pockets this residue belongs to)
 
-Uses WSL to call fpocket (Linux binary) from Windows.
+Supports both native Linux and Windows+WSL. Auto-detects platform.
+Uses multiprocessing on native Linux for parallel extraction.
 Aligns residues with extract_features.py using same NONSTANDARD_MAP and filtering.
 """
 
@@ -23,19 +24,30 @@ import sys
 import re
 import subprocess
 import tempfile
+import argparse
+import platform
+import shutil
 import numpy as np
+import pandas as pd
 import time
+from multiprocessing import Pool, cpu_count
 from Bio.PDB import PDBParser
 import warnings
 
 warnings.filterwarnings('ignore')
 
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PDB_DIR = os.path.join(DATA_DIR, "pdb_files")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 FEATURES_DIR = os.path.join(DATA_DIR, "..", "features")
 FPOCKET_DIR = os.path.join(FEATURES_DIR, "fpocket")
 os.makedirs(FPOCKET_DIR, exist_ok=True)
+
+# CASBench paths
+CASBENCH_DIR = os.path.join(DATA_DIR, "casbench")
+CASBENCH_LABELS_DIR = os.path.join(CASBENCH_DIR, "labels")
+CASBENCH_FEATURES_DIR = os.path.join(CASBENCH_DIR, "features")
 
 AA_LIST = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS',
            'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP',
@@ -53,6 +65,9 @@ FPOCKET_FEATURE_NAMES = [
 
 FPOCKET_DIM = len(FPOCKET_FEATURE_NAMES)
 
+# Auto-detect platform
+IS_LINUX = platform.system() == 'Linux'
+
 
 def get_residue_keys(pdb_path):
     """Get residue keys matching extract_features.py ordering."""
@@ -63,9 +78,9 @@ def get_residue_keys(pdb_path):
     keys = []
     for chain in model:
         for res in chain:
-            if res.id[0] != ' ':
-                continue
             resname = res.get_resname()
+            if res.id[0] != ' ' and resname not in NONSTANDARD_MAP:
+                continue
             if resname in NONSTANDARD_MAP:
                 resname = NONSTANDARD_MAP[resname]
             if resname not in AA_LIST:
@@ -81,12 +96,41 @@ def win_to_wsl(path):
     return f"/mnt/{path[0].lower()}/{path[3:].replace(os.sep, '/')}"
 
 
-def run_fpocket_and_parse(pdb_path):
-    """Run FPocket + parse all output in ONE WSL call. Returns (raw_stdout, name_stem).
+def run_fpocket_native(pdb_path):
+    """Run FPocket natively on Linux. Returns (raw_stdout, name_stem)."""
+    pdb_name = os.path.basename(pdb_path)
+    name_stem = os.path.splitext(pdb_name)[0]
+    tmp_dir = f"/tmp/fpocket_work/{name_stem}_{os.getpid()}"
 
-    Uses a temp bash script file to avoid Windows->WSL argument escaping issues
-    that mangle $f and $num shell variables.
-    """
+    script = f"""#!/bin/bash
+mkdir -p {tmp_dir} && cd {tmp_dir}
+rm -rf '{name_stem}_out' '{name_stem}.pdb' 2>/dev/null
+cp '{pdb_path}' . && fpocket -f '{pdb_name}' >/dev/null 2>&1
+echo '===INFO_START==='
+cat '{name_stem}_out/{name_stem}_info.txt' 2>/dev/null
+echo '===INFO_END==='
+for f in {name_stem}_out/pockets/pocket*_atm.pdb; do
+  [ -f "$f" ] || continue
+  num=$(echo "$f" | grep -oP 'pocket\\K[0-9]+')
+  echo "===POCKET_${{num}}_START==="
+  grep ^ATOM "$f" 2>/dev/null
+  echo "===POCKET_${{num}}_END==="
+done
+rm -rf '{tmp_dir}' 2>/dev/null
+"""
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True, text=True, timeout=600
+        )
+        return result.stdout, name_stem
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+
+def run_fpocket_wsl(pdb_path):
+    """Run FPocket via WSL on Windows. Returns (raw_stdout, name_stem)."""
     pdb_name = os.path.basename(pdb_path)
     name_stem = os.path.splitext(pdb_name)[0]
     tmp_dir = f"/tmp/fpocket_work/{name_stem}_{os.getpid()}"
@@ -108,7 +152,6 @@ for f in {name_stem}_out/pockets/pocket*_atm.pdb; do
 done
 rm -rf '{tmp_dir}' 2>/dev/null
 """
-    # Write to temp file with Unix line endings
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', prefix='fpocket_',
                                       newline='\n', delete=False,
                                       dir=os.path.dirname(pdb_path))
@@ -116,10 +159,9 @@ rm -rf '{tmp_dir}' 2>/dev/null
         tmp.write(script_content)
         tmp.close()
         wsl_script = win_to_wsl(tmp.name)
-
         result = subprocess.run(
             ["wsl", "-d", "Ubuntu", "--", "bash", wsl_script],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=600
         )
         return result.stdout, name_stem
     finally:
@@ -129,8 +171,16 @@ rm -rf '{tmp_dir}' 2>/dev/null
             pass
 
 
-def run_fpocket_batch(pdb_paths):
-    """Run FPocket on MULTIPLE proteins in a single WSL call. Much faster.
+def run_fpocket_and_parse(pdb_path):
+    """Run FPocket, auto-detecting platform."""
+    if IS_LINUX:
+        return run_fpocket_native(pdb_path)
+    else:
+        return run_fpocket_wsl(pdb_path)
+
+
+def run_fpocket_batch_wsl(pdb_paths):
+    """Run FPocket on MULTIPLE proteins in a single WSL call (Windows only).
 
     Returns dict of {name_stem: raw_output_section}.
     """
@@ -138,7 +188,7 @@ def run_fpocket_batch(pdb_paths):
         return {}
 
     tmp_dir = "/tmp/fpocket_work"
-    lines = [f"#!/bin/bash", f"mkdir -p {tmp_dir}", f"cd {tmp_dir}"]
+    lines = ["#!/bin/bash", f"mkdir -p {tmp_dir}", f"cd {tmp_dir}"]
 
     stems = []
     for pdb_path in pdb_paths:
@@ -166,7 +216,6 @@ def run_fpocket_batch(pdb_paths):
 
     script_content = '\n'.join(lines) + '\n'
 
-    # Write to temp file
     sample_dir = os.path.dirname(pdb_paths[0])
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', prefix='fpocket_batch_',
                                       newline='\n', delete=False, dir=sample_dir)
@@ -175,13 +224,12 @@ def run_fpocket_batch(pdb_paths):
         tmp.close()
         wsl_script = win_to_wsl(tmp.name)
 
-        timeout = 120 * len(pdb_paths)  # Scale timeout with batch size
+        timeout = 120 * len(pdb_paths)
         result = subprocess.run(
             ["wsl", "-d", "Ubuntu", "--", "bash", wsl_script],
             capture_output=True, text=True, timeout=timeout
         )
 
-        # Split output by protein
         raw = result.stdout
         results = {}
         for stem in stems:
@@ -200,7 +248,7 @@ def run_fpocket_batch(pdb_paths):
 
 
 def parse_all_output(raw_output):
-    """Parse the combined fpocket output from a single WSL call."""
+    """Parse the combined fpocket output."""
     # Parse pocket info
     pockets = {}
     info_match = re.search(r'===INFO_START===\n(.*?)===INFO_END===', raw_output, re.DOTALL)
@@ -244,72 +292,100 @@ def parse_all_output(raw_output):
     return pockets, pocket_residues
 
 
-def extract_fpocket_features(pdb_path, residue_keys):
-    """Run FPocket and extract per-residue features. Single WSL call."""
-    n_residues = len(residue_keys)
-    features = np.zeros((n_residues, FPOCKET_DIM), dtype=np.float32)
+def process_single_protein(args):
+    """Process a single protein — designed for multiprocessing Pool (native Linux)."""
+    pdb_id, pdb_path, output_dir, label_dir = args
 
-    # One WSL call for everything
-    raw_output, name_stem = run_fpocket_and_parse(pdb_path)
-    pockets, pocket_residues = parse_all_output(raw_output)
+    output_path = os.path.join(output_dir, f"{pdb_id}_fpocket.npz")
+    if os.path.exists(output_path):
+        return pdb_id, "skipped"
 
-    if not pockets:
-        return features  # No pockets found — all zeros
+    if not os.path.exists(pdb_path):
+        return pdb_id, "no PDB"
 
-    # Diagnostic: print pocket keys once (helps verify key names match our code)
-    first_pocket = pockets[min(pockets.keys())]
-    if first_pocket and not hasattr(extract_fpocket_features, '_printed_keys'):
-        extract_fpocket_features._printed_keys = True
-        print(f"  [DEBUG] FPocket info keys for first pocket: {list(first_pocket.keys())}")
+    try:
+        keys = get_residue_keys(pdb_path)
+        if len(keys) == 0:
+            return pdb_id, "no residues"
 
-    n_pockets = len(pockets)
+        raw_output, name_stem = run_fpocket_native(pdb_path)
+        pockets, pocket_residues = parse_all_output(raw_output)
 
-    # Build residue → pocket mapping
-    key_to_idx = {}
-    for i, key in enumerate(residue_keys):
-        key_to_idx[key] = i
+        n_residues = len(keys)
+        features = np.zeros((n_residues, FPOCKET_DIM), dtype=np.float32)
 
-    res_to_pockets = {i: [] for i in range(n_residues)}
-    for pocket_num, res_keys in pocket_residues.items():
-        if pocket_num not in pockets:
-            continue
-        for res_key in res_keys:
-            if res_key in key_to_idx:
-                res_to_pockets[key_to_idx[res_key]].append(pocket_num)
+        if pockets:
+            n_pockets = len(pockets)
+            key_to_idx = {key: i for i, key in enumerate(keys)}
+            res_to_pockets = {i: [] for i in range(n_residues)}
 
-    # Assign features per residue
-    for i in range(n_residues):
-        pocket_list = res_to_pockets[i]
-        if not pocket_list:
-            continue
+            for pocket_num, res_keys in pocket_residues.items():
+                if pocket_num not in pockets:
+                    continue
+                for res_key in res_keys:
+                    if res_key in key_to_idx:
+                        res_to_pockets[key_to_idx[res_key]].append(pocket_num)
 
-        best_pocket = min(pocket_list)
-        p = pockets[best_pocket]
+            for i in range(n_residues):
+                pocket_list = res_to_pockets[i]
+                if not pocket_list:
+                    continue
+                best_pocket = min(pocket_list)
+                p = pockets[best_pocket]
+                features[i, 0] = 1.0
+                features[i, 1] = p.get('Score', 0.0)
+                features[i, 2] = p.get('Druggability Score', p.get('Drug Score', 0.0))
+                features[i, 3] = p.get('Volume', p.get('Pocket volume (Monte Carlo)',
+                                 p.get('Volume Score', 0.0)))
+                features[i, 4] = p.get('Hydrophobicity score', p.get('Hydrophobicity Score', 0.0))
+                features[i, 5] = p.get('Polarity score', p.get('Polarity Score', 0.0))
+                features[i, 6] = (n_pockets - best_pocket + 1) / max(n_pockets, 1)
+                features[i, 7] = len(pocket_list)
 
-        features[i, 0] = 1.0  # is_in_pocket
-        features[i, 1] = p.get('Score', 0.0)
-        features[i, 2] = p.get('Druggability Score', p.get('Drug Score', 0.0))
-        features[i, 3] = p.get('Volume', p.get('Pocket volume (Monte Carlo)',
-                         p.get('Volume Score', 0.0)))
-        features[i, 4] = p.get('Hydrophobicity score', p.get('Hydrophobicity Score', 0.0))
-        features[i, 5] = p.get('Polarity score', p.get('Polarity Score', 0.0))
-        features[i, 6] = (n_pockets - best_pocket + 1) / max(n_pockets, 1)  # Normalized rank (1.0=best)
-        features[i, 7] = len(pocket_list)
+        # Align with labels
+        label_path = os.path.join(label_dir, f"{pdb_id}_labels.csv")
+        if not os.path.exists(label_path):
+            return pdb_id, "error: no label file"
 
-    return features
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
+        feat_lookup = {}
+        for i, key in enumerate(keys):
+            feat_lookup[(key[0], key[1])] = i
+
+        aligned_features = []
+        for _, lrow in labels_df.iterrows():
+            lkey = (lrow['chain'], lrow['resnum'])
+            if lkey in feat_lookup:
+                aligned_features.append(features[feat_lookup[lkey]])
+            else:
+                aligned_features.append(np.zeros(FPOCKET_DIM, dtype=np.float32))
+        features = np.array(aligned_features, dtype=np.float32)
+        n_residues = len(features)
+
+        np.savez_compressed(output_path, features=features)
+
+        n_in_pocket = int((features[:, 0] > 0).sum())
+        return pdb_id, f"ok ({n_residues} res, {n_in_pocket} in pockets)"
+    except Exception as e:
+        return pdb_id, f"error: {e}"
 
 
-def process_batch(pdb_ids_batch):
-    """Process a batch of proteins in a single WSL call. Returns list of (pdb_id, status)."""
-    # Pre-filter: skip existing and missing PDBs
+def process_batch_wsl(pdb_ids_batch, pdb_dir=PDB_DIR, output_dir=FPOCKET_DIR, label_dir=PROCESSED_DIR,
+                      pdb_path_map=None):
+    """Process a batch of proteins in a single WSL call (Windows). Returns list of (pdb_id, status)."""
+    def _get_pdb_path(pid):
+        if pdb_path_map and pid in pdb_path_map:
+            return pdb_path_map[pid]
+        return os.path.join(pdb_dir, f"{pid}.pdb")
+
     to_process = []
     results = []
     for pdb_id in pdb_ids_batch:
-        output_path = os.path.join(FPOCKET_DIR, f"{pdb_id}_fpocket.npz")
+        output_path = os.path.join(output_dir, f"{pdb_id}_fpocket.npz")
         if os.path.exists(output_path):
             results.append((pdb_id, "skipped"))
             continue
-        pdb_path = os.path.join(PDB_DIR, f"{pdb_id}.pdb")
+        pdb_path = _get_pdb_path(pdb_id)
         if not os.path.exists(pdb_path):
             results.append((pdb_id, "no PDB"))
             continue
@@ -318,31 +394,31 @@ def process_batch(pdb_ids_batch):
     if not to_process:
         return results
 
-    # Get residue keys for each protein (Python-side, fast)
     residue_keys_map = {}
     pdb_paths = []
     for pdb_id in to_process:
-        pdb_path = os.path.join(PDB_DIR, f"{pdb_id}.pdb")
-        keys = get_residue_keys(pdb_path)
-        if len(keys) == 0:
-            results.append((pdb_id, "no residues"))
+        pdb_path = _get_pdb_path(pdb_id)
+        try:
+            keys = get_residue_keys(pdb_path)
+            if len(keys) == 0:
+                results.append((pdb_id, "no residues"))
+                continue
+            residue_keys_map[pdb_id] = keys
+            pdb_paths.append(pdb_path)
+        except Exception as e:
+            results.append((pdb_id, f"error: residue parsing: {e}"))
             continue
-        residue_keys_map[pdb_id] = keys
-        pdb_paths.append(pdb_path)
 
     if not pdb_paths:
         return results
 
-    # Run fpocket on all proteins in ONE WSL call
     try:
-        batch_output = run_fpocket_batch(pdb_paths)
+        batch_output = run_fpocket_batch_wsl(pdb_paths)
     except Exception as e:
-        # If batch fails, mark all as error
         for pdb_id in residue_keys_map:
             results.append((pdb_id, f"error: batch failed: {e}"))
         return results
 
-    # Parse each protein's output and save features
     for pdb_id, keys in residue_keys_map.items():
         name_stem = pdb_id
         raw_section = batch_output.get(name_stem, '')
@@ -354,12 +430,6 @@ def process_batch(pdb_ids_batch):
             features = np.zeros((n_residues, FPOCKET_DIM), dtype=np.float32)
 
             if pockets:
-                # Debug: print keys once
-                first_pocket = pockets[min(pockets.keys())]
-                if first_pocket and not hasattr(process_batch, '_printed_keys'):
-                    process_batch._printed_keys = True
-                    print(f"  [DEBUG] FPocket info keys: {list(first_pocket.keys())}")
-
                 n_pockets = len(pockets)
                 key_to_idx = {key: i for i, key in enumerate(keys)}
                 res_to_pockets = {i: [] for i in range(n_residues)}
@@ -387,7 +457,27 @@ def process_batch(pdb_ids_batch):
                     features[i, 6] = (n_pockets - best_pocket + 1) / max(n_pockets, 1)
                     features[i, 7] = len(pocket_list)
 
-            output_path = os.path.join(FPOCKET_DIR, f"{pdb_id}_fpocket.npz")
+            label_path = os.path.join(label_dir, f"{pdb_id}_labels.csv")
+            if not os.path.exists(label_path):
+                results.append((pdb_id, "error: no label file"))
+                continue
+
+            labels_df = pd.read_csv(label_path, dtype={'chain': str})
+            feat_lookup = {}
+            for i, key in enumerate(keys):
+                feat_lookup[(key[0], key[1])] = i
+
+            aligned_features = []
+            for _, lrow in labels_df.iterrows():
+                lkey = (lrow['chain'], lrow['resnum'])
+                if lkey in feat_lookup:
+                    aligned_features.append(features[feat_lookup[lkey]])
+                else:
+                    aligned_features.append(np.zeros(FPOCKET_DIM, dtype=np.float32))
+            features = np.array(aligned_features, dtype=np.float32)
+            n_residues = len(features)
+
+            output_path = os.path.join(output_dir, f"{pdb_id}_fpocket.npz")
             np.savez_compressed(output_path, features=features)
 
             n_in_pocket = int((features[:, 0] > 0).sum())
@@ -398,39 +488,88 @@ def process_batch(pdb_ids_batch):
     return results
 
 
-BATCH_SIZE = 10  # Process 10 proteins per WSL call
+BATCH_SIZE = 10  # Process 10 proteins per WSL call (Windows only)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Extract FPocket features")
+    parser.add_argument('--casbench', action='store_true',
+                        help='Process CASBench proteins instead of training proteins')
+    parser.add_argument('--workers', type=int, default=0,
+                        help='Number of parallel workers (Linux only, default: cpu_count-2)')
+    return parser.parse_args()
 
 
 def main():
+    args = parse_args()
+
     print("=" * 60)
-    print("  FPocket Feature Extraction (batched)")
+    if IS_LINUX:
+        print("  FPocket Feature Extraction (native Linux, multiprocessing)")
+    else:
+        print("  FPocket Feature Extraction (Windows + WSL, batched)")
     print("=" * 60)
 
-    # Test WSL + fpocket
-    print("\nTesting WSL + fpocket...")
-    result = subprocess.run(
-        ["wsl", "-d", "Ubuntu", "--", "bash", "-c", "fpocket 2>&1 | head -1"],
-        capture_output=True, text=True, timeout=10
-    )
-    if "POCKET HUNTING" not in result.stdout and "fpocket" not in result.stdout.lower():
-        print("ERROR: fpocket not available in WSL!")
+    # Test fpocket
+    if IS_LINUX:
+        print("\nTesting fpocket...")
+        result = subprocess.run(
+            ["bash", "-c", "fpocket 2>&1 | head -1"],
+            capture_output=True, text=True, timeout=10
+        )
+    else:
+        print("\nTesting WSL + fpocket...")
+        result = subprocess.run(
+            ["wsl", "-d", "Ubuntu", "--", "bash", "-c", "fpocket 2>&1 | head -1"],
+            capture_output=True, text=True, timeout=10
+        )
+
+    if "POCKET HUNTING" not in result.stdout:
+        print("ERROR: fpocket not available!")
         print(f"  stdout: {result.stdout}")
         print(f"  stderr: {result.stderr}")
         sys.exit(1)
     print("  fpocket OK")
 
-    # Load protein list
-    import pandas as pd
-    splits_path = os.path.join(PROCESSED_DIR, "train_val_test_splits.csv")
-    splits = pd.read_csv(splits_path)
-    pdb_ids = splits['pdb_id'].tolist()
+    pdb_path_map = None
+
+    if args.casbench:
+        output_dir = CASBENCH_FEATURES_DIR
+        label_dir = CASBENCH_LABELS_DIR
+        os.makedirs(output_dir, exist_ok=True)
+        pdb_csv = os.path.join(CASBENCH_DIR, "casbench_independent_pdbs.csv")
+        if not os.path.exists(pdb_csv):
+            print(f"ERROR: {pdb_csv} not found. Run evaluate_casbench.py --phase discover first.")
+            return
+
+        pdb_list = pd.read_csv(pdb_csv)
+        pdb_list = pdb_list[pdb_list['is_overlap'] == False]
+        pdb_ids = pdb_list['pdb_id'].tolist()
+        pdb_path_map = dict(zip(pdb_list['pdb_id'], pdb_list['pdb_path']))
+        pdb_dir = PDB_DIR
+        print(f"\n  Mode: CASBench ({len(pdb_ids)} independent proteins)")
+        print(f"  Output: {output_dir}")
+    else:
+        output_dir = FPOCKET_DIR
+        label_dir = PROCESSED_DIR
+        pdb_dir = PDB_DIR
+
+        summary_path = os.path.join(PROCESSED_DIR, "dataset_summary.csv")
+        if os.path.exists(summary_path):
+            summary = pd.read_csv(summary_path)
+            pdb_ids = summary['pdb_id'].tolist()
+        else:
+            splits_path = os.path.join(PROCESSED_DIR, "train_val_test_splits.csv")
+            splits = pd.read_csv(splits_path)
+            pdb_ids = splits['pdb_id'].tolist()
+        print(f"\n  Mode: Training proteins")
+        print(f"  Output: {output_dir}")
 
     # Check existing
-    existing = sum(1 for p in pdb_ids if os.path.exists(os.path.join(FPOCKET_DIR, f"{p}_fpocket.npz")))
-    print(f"\n  Total proteins: {len(pdb_ids)}")
+    existing = sum(1 for p in pdb_ids if os.path.exists(os.path.join(output_dir, f"{p}_fpocket.npz")))
+    print(f"  Total proteins: {len(pdb_ids)}")
     print(f"  Already done:   {existing}")
     print(f"  Remaining:      {len(pdb_ids) - existing}")
-    print(f"  Batch size:     {BATCH_SIZE} proteins/WSL call")
 
     start_time = time.time()
     n_done = 0
@@ -438,32 +577,68 @@ def main():
     n_error = 0
     n_skipped = 0
 
-    # Process in batches
-    for batch_start in range(0, len(pdb_ids), BATCH_SIZE):
-        batch = pdb_ids[batch_start:batch_start + BATCH_SIZE]
-        batch_results = process_batch(batch)
+    if IS_LINUX:
+        # Native Linux: use multiprocessing Pool
+        # Use physical cores only; cap at 48
+        n_workers = args.workers if args.workers > 0 else min(max(1, cpu_count() - 2), 48)
+        print(f"  Workers: {n_workers}")
 
-        for pdb_id, status in batch_results:
-            n_done += 1
-            if status == "skipped":
-                n_skipped += 1
-            elif status.startswith("ok"):
-                n_ok += 1
-            else:
-                n_error += 1
-                if "error" in status:
-                    print(f"  ERROR: {pdb_id}: {status}")
+        def _get_pdb_path(pid):
+            if pdb_path_map and pid in pdb_path_map:
+                return pdb_path_map[pid]
+            return os.path.join(pdb_dir, f"{pid}.pdb")
 
-        # Progress every batch
-        elapsed = time.time() - start_time
-        rate = n_done / max(elapsed, 1)
-        remaining = (len(pdb_ids) - n_done) / max(rate, 0.01)
-        new_ok = sum(1 for _, s in batch_results if s.startswith("ok"))
-        if new_ok > 0:
-            sample = [(pid, s) for pid, s in batch_results if s.startswith("ok")][-1]
-            print(f"  [{n_done:>5}/{len(pdb_ids)}] batch {batch_start//BATCH_SIZE + 1}: "
-                  f"{new_ok} ok, last={sample[0]} {sample[1]} "
-                  f"({elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining)")
+        tasks = [(pid, _get_pdb_path(pid), output_dir, label_dir) for pid in pdb_ids]
+
+        with Pool(processes=n_workers) as pool:
+            for result in pool.imap_unordered(process_single_protein, tasks, chunksize=4):
+                pdb_id, status = result
+                n_done += 1
+                if status == "skipped":
+                    n_skipped += 1
+                elif status.startswith("ok"):
+                    n_ok += 1
+                else:
+                    n_error += 1
+                    if "error" in status:
+                        print(f"  ERROR: {pdb_id}: {status}")
+
+                if n_ok > 0 and n_ok % 50 == 0:
+                    elapsed = time.time() - start_time
+                    rate = (n_ok + n_skipped) / max(elapsed, 1)
+                    remaining = (len(pdb_ids) - n_done) / max(rate, 0.01)
+                    print(f"  [{n_done:>5}/{len(pdb_ids)}] {n_ok} ok, {n_skipped} skipped, "
+                          f"{n_error} errors ({elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining)")
+
+    else:
+        # Windows: WSL batched approach
+        print(f"  Batch size: {BATCH_SIZE} proteins/WSL call")
+
+        for batch_start in range(0, len(pdb_ids), BATCH_SIZE):
+            batch = pdb_ids[batch_start:batch_start + BATCH_SIZE]
+            batch_results = process_batch_wsl(batch, pdb_dir=pdb_dir, output_dir=output_dir,
+                                              label_dir=label_dir, pdb_path_map=pdb_path_map)
+
+            for pdb_id, status in batch_results:
+                n_done += 1
+                if status == "skipped":
+                    n_skipped += 1
+                elif status.startswith("ok"):
+                    n_ok += 1
+                else:
+                    n_error += 1
+                    if "error" in status:
+                        print(f"  ERROR: {pdb_id}: {status}")
+
+            elapsed = time.time() - start_time
+            rate = n_done / max(elapsed, 1)
+            remaining = (len(pdb_ids) - n_done) / max(rate, 0.01)
+            new_ok = sum(1 for _, s in batch_results if s.startswith("ok"))
+            if new_ok > 0:
+                sample = [(pid, s) for pid, s in batch_results if s.startswith("ok")][-1]
+                print(f"  [{n_done:>5}/{len(pdb_ids)}] batch {batch_start//BATCH_SIZE + 1}: "
+                      f"{new_ok} ok, last={sample[0]} {sample[1]} "
+                      f"({elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining)")
 
     elapsed = time.time() - start_time
     print(f"\n{'=' * 60}")

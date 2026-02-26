@@ -33,7 +33,8 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import joblib
 
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 FEATURES_DIR = os.path.join(DATA_DIR, "..", "features")
 ESM_650M_DIR = os.path.join(FEATURES_DIR, "esm2_embeddings")
@@ -42,6 +43,9 @@ NMA_DIR = os.path.join(FEATURES_DIR, "nma_graph")
 FPOCKET_DIR = os.path.join(FEATURES_DIR, "fpocket")
 AAINDEX_DIR = os.path.join(FEATURES_DIR, "aaindex")
 TE_DIR = os.path.join(FEATURES_DIR, "transfer_entropy")
+PRS_DIR = os.path.join(FEATURES_DIR, "prs")
+MJ_DIR = os.path.join(FEATURES_DIR, "mj_energy")
+FRUST_DIR = os.path.join(FEATURES_DIR, "frustration")
 OUTPUT_DIR = os.path.join(DATA_DIR, "..", "models")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -54,6 +58,9 @@ NMA_GRAPH_DIM = 11   # 6 NMA + 5 graph centrality
 FPOCKET_DIM = 8      # FPocket pocket geometry features
 AAINDEX_DIM = 6      # AAindex physicochemical properties
 TE_DIM = 3           # Transfer entropy (AllosES: nte_score, te_out_sum, te_in_sum)
+PRS_DIM = 3          # PRS (Atilgan 2009: effectiveness, sensitivity, eff/sens ratio)
+MJ_DIM = 2           # MJ contact energy (Miyazawa & Jernigan 1996: sum, mean)
+FRUST_DIM = 7        # Local frustration (Ferreiro 2007: 4 config + 3 mutational)
 
 
 def parse_args():
@@ -104,10 +111,19 @@ def load_and_combine():
     n_without_aaindex = 0
     n_with_te = 0
     n_without_te = 0
+    n_with_prs = 0
+    n_without_prs = 0
+    n_with_mj = 0
+    n_without_mj = 0
+    n_with_frust = 0
+    n_without_frust = 0
     n_nma_length_mismatch = 0
     n_fpocket_length_mismatch = 0
     n_aaindex_length_mismatch = 0
     n_te_length_mismatch = 0
+    n_prs_length_mismatch = 0
+    n_mj_length_mismatch = 0
+    n_frust_length_mismatch = 0
     n_esm650_length_mismatch = 0
     n_esm3b_length_mismatch = 0
     total_residues = 0
@@ -147,11 +163,11 @@ def load_and_combine():
                 n_with_nma += 1
             else:
                 print(f"  WARNING: {pdb_id} NMA length mismatch ({len(nma_feat)} vs {len(features)}), padding with zeros")
-                features = np.concatenate([features, np.zeros((len(features), NMA_GRAPH_DIM))], axis=1)
+                features = np.concatenate([features, np.zeros((len(features), NMA_GRAPH_DIM), dtype=np.float32)], axis=1)
                 n_without_nma += 1
                 n_nma_length_mismatch += 1
         else:
-            features = np.concatenate([features, np.zeros((len(features), NMA_GRAPH_DIM))], axis=1)
+            features = np.concatenate([features, np.zeros((len(features), NMA_GRAPH_DIM), dtype=np.float32)], axis=1)
             n_without_nma += 1
 
         # Load FPocket features (8-dim)
@@ -211,6 +227,68 @@ def load_and_combine():
             features = np.concatenate([features, np.zeros((len(labels), TE_DIM), dtype=np.float32)], axis=1)
             n_without_te += 1
 
+        # Load PRS features (3-dim)
+        prs_path = os.path.join(PRS_DIR, f"{pdb_id}_prs.npz")
+        if os.path.exists(prs_path):
+            prs_data = np.load(prs_path)
+            prs_feat = prs_data['features']
+            assert prs_feat.shape[1] == PRS_DIM, \
+                f"{pdb_id}: expected {PRS_DIM} PRS features, got {prs_feat.shape[1]}"
+            if len(prs_feat) == len(labels):
+                features = np.concatenate([features, prs_feat], axis=1)
+                n_with_prs += 1
+            else:
+                print(f"  WARNING: {pdb_id} PRS length mismatch ({len(prs_feat)} vs {len(labels)}), padding with zeros")
+                features = np.concatenate([features, np.zeros((len(labels), PRS_DIM), dtype=np.float32)], axis=1)
+                n_without_prs += 1
+                n_prs_length_mismatch += 1
+        else:
+            features = np.concatenate([features, np.zeros((len(labels), PRS_DIM), dtype=np.float32)], axis=1)
+            n_without_prs += 1
+
+        # Load MJ contact energy features (2-dim)
+        mj_path = os.path.join(MJ_DIR, f"{pdb_id}_mj.npz")
+        if os.path.exists(mj_path):
+            mj_data = np.load(mj_path)
+            mj_feat = mj_data['features']
+            assert mj_feat.shape[1] == MJ_DIM, \
+                f"{pdb_id}: expected {MJ_DIM} MJ features, got {mj_feat.shape[1]}"
+            if len(mj_feat) == len(labels):
+                features = np.concatenate([features, mj_feat], axis=1)
+                n_with_mj += 1
+            else:
+                print(f"  WARNING: {pdb_id} MJ length mismatch ({len(mj_feat)} vs {len(labels)}), padding with zeros")
+                features = np.concatenate([features, np.zeros((len(labels), MJ_DIM), dtype=np.float32)], axis=1)
+                n_without_mj += 1
+                n_mj_length_mismatch += 1
+        else:
+            features = np.concatenate([features, np.zeros((len(labels), MJ_DIM), dtype=np.float32)], axis=1)
+            n_without_mj += 1
+
+        # Load Local Frustration features (up to 7-dim: 4 config + 3 mutational)
+        frust_path = os.path.join(FRUST_DIR, f"{pdb_id}_frust.npz")
+        if os.path.exists(frust_path):
+            frust_data = np.load(frust_path)
+            frust_feat = frust_data['features']
+            # Handle variable dimensionality: 4 (config only) or 7 (config + mutational)
+            if frust_feat.shape[1] < FRUST_DIM:
+                # Zero-pad mutational columns if only configurational was extracted
+                pad_cols = FRUST_DIM - frust_feat.shape[1]
+                frust_feat = np.concatenate([frust_feat, np.zeros((len(frust_feat), pad_cols), dtype=np.float32)], axis=1)
+            assert frust_feat.shape[1] == FRUST_DIM, \
+                f"{pdb_id}: expected {FRUST_DIM} frustration features, got {frust_feat.shape[1]}"
+            if len(frust_feat) == len(labels):
+                features = np.concatenate([features, frust_feat], axis=1)
+                n_with_frust += 1
+            else:
+                print(f"  WARNING: {pdb_id} frustration length mismatch ({len(frust_feat)} vs {len(labels)}), padding with zeros")
+                features = np.concatenate([features, np.zeros((len(labels), FRUST_DIM), dtype=np.float32)], axis=1)
+                n_without_frust += 1
+                n_frust_length_mismatch += 1
+        else:
+            features = np.concatenate([features, np.zeros((len(labels), FRUST_DIM), dtype=np.float32)], axis=1)
+            n_without_frust += 1
+
         # Load ESM-2 embeddings (both models, concatenated per-protein)
         # This avoids storing 650M and 3B in separate arrays (~48 GB peak -> ~27 GB)
         n_res = len(labels)
@@ -258,7 +336,7 @@ def load_and_combine():
             print(f"  ... loaded {n_proteins} proteins ({elapsed:.0f}s)")
 
     elapsed = time.time() - start_time
-    total_struct_dim = STRUCTURAL_DIM + NMA_GRAPH_DIM + FPOCKET_DIM + AAINDEX_DIM + TE_DIM
+    total_struct_dim = STRUCTURAL_DIM + NMA_GRAPH_DIM + FPOCKET_DIM + AAINDEX_DIM + TE_DIM + PRS_DIM + MJ_DIM + FRUST_DIM
 
     print(f"\n{'-' * 40}")
     print(f"Loading complete ({elapsed:.1f}s)")
@@ -279,6 +357,15 @@ def load_and_combine():
     print(f"  Transfer Entropy:     {n_with_te} / {n_proteins}")
     if n_te_length_mismatch > 0:
         print(f"    Length mismatches:  {n_te_length_mismatch}")
+    print(f"  PRS available:        {n_with_prs} / {n_proteins}")
+    if n_prs_length_mismatch > 0:
+        print(f"    Length mismatches:  {n_prs_length_mismatch}")
+    print(f"  MJ energy available:  {n_with_mj} / {n_proteins}")
+    if n_mj_length_mismatch > 0:
+        print(f"    Length mismatches:  {n_mj_length_mismatch}")
+    print(f"  Frustration available:{n_with_frust} / {n_proteins}")
+    if n_frust_length_mismatch > 0:
+        print(f"    Length mismatches:  {n_frust_length_mismatch}")
     print(f"  ESM-2 650M available: {n_with_esm650} / {n_proteins}")
     if n_esm650_length_mismatch > 0:
         print(f"    Length mismatches:  {n_esm650_length_mismatch}")
@@ -314,18 +401,7 @@ def load_and_combine():
     if not isinstance(all_structural['train'], np.ndarray) or len(all_structural['train']) == 0:
         print("ERROR: No training data loaded. Check feature files and splits CSV.")
         return
-    scaler = StandardScaler()
-    all_structural['train'] = scaler.fit_transform(all_structural['train'])
-    print(f"  Fitted on train ({all_structural['train'].shape[0]:,} samples)")
-    print(f"  Feature means (first 5): {scaler.mean_[:5].round(4)}")
-    print(f"  Feature stds  (first 5): {scaler.scale_[:5].round(4)}")
-
-    for split in ['val', 'test']:
-        if isinstance(all_structural[split], np.ndarray) and len(all_structural[split]) > 0:
-            all_structural[split] = scaler.transform(all_structural[split])
-            print(f"  Transformed {split} ({all_structural[split].shape[0]:,} samples)")
-
-    # Check for NaN/inf after scaling
+    # Clean NaN/Inf BEFORE scaling (StandardScaler crashes on NaN)
     for split in ['train', 'val', 'test']:
         if isinstance(all_structural[split], np.ndarray):
             n_nan = np.isnan(all_structural[split]).sum()
@@ -333,6 +409,17 @@ def load_and_combine():
             if n_nan > 0 or n_inf > 0:
                 print(f"  WARNING: {split} has {n_nan} NaN and {n_inf} Inf values -- replacing with 0")
             all_structural[split] = np.nan_to_num(all_structural[split], nan=0.0, posinf=0.0, neginf=0.0)
+
+    scaler = StandardScaler()
+    all_structural['train'] = scaler.fit_transform(all_structural['train']).astype(np.float32)
+    print(f"  Fitted on train ({all_structural['train'].shape[0]:,} samples)")
+    print(f"  Feature means (first 5): {scaler.mean_[:5].round(4)}")
+    print(f"  Feature stds  (first 5): {scaler.scale_[:5].round(4)}")
+
+    for split in ['val', 'test']:
+        if isinstance(all_structural[split], np.ndarray) and len(all_structural[split]) > 0:
+            all_structural[split] = scaler.transform(all_structural[split]).astype(np.float32)
+            print(f"  Transformed {split} ({all_structural[split].shape[0]:,} samples)")
 
     scaler_path = os.path.join(OUTPUT_DIR, "feature_scaler.joblib")
     joblib.dump(scaler, scaler_path)
@@ -381,27 +468,30 @@ def load_and_combine():
             n_both = min(n_with_esm650, n_with_esm3b)
             print(f"  Both models active: {ESM_JOINT_DIM} dims (overlap ~{n_both}/{n_proteins})")
 
-        print(f"  PCA: {esm_raw_dim} -> {ESM_PCA_DIM} components")
+        actual_pca_dim = min(ESM_PCA_DIM, all_esm_joint['train'].shape[0])
+        print(f"  PCA: {esm_raw_dim} -> {actual_pca_dim} components")
 
-        pca = PCA(n_components=ESM_PCA_DIM, random_state=42, svd_solver='randomized')
+        pca = PCA(n_components=actual_pca_dim, random_state=42, svd_solver='randomized')
         t0 = time.time()
-        all_esm_joint['train'] = pca.fit_transform(all_esm_joint['train'])
+        all_esm_joint['train'] = pca.fit_transform(all_esm_joint['train']).astype(np.float32)
         print(f"  Fitted on train ({time.time()-t0:.1f}s)")
         print(f"  Explained variance: {pca.explained_variance_ratio_.sum():.3f}")
         print(f"  Top 5 component variances: {pca.explained_variance_ratio_[:5].round(4)}")
 
         for split in ['val', 'test']:
             if isinstance(all_esm_joint[split], np.ndarray) and len(all_esm_joint[split]) > 0:
-                all_esm_joint[split] = pca.transform(all_esm_joint[split])
+                all_esm_joint[split] = pca.transform(all_esm_joint[split]).astype(np.float32)
                 print(f"  Transformed {split}: {all_esm_joint[split].shape}")
 
         pca_path = os.path.join(OUTPUT_DIR, "esm2_joint_pca.joblib")
         joblib.dump(pca, pca_path)
         print(f"  PCA saved to {pca_path}")
         gc.collect()
+        esm_pca_actual = actual_pca_dim
     else:
         print(f"  No ESM model has >50% coverage -- SKIPPING ESM entirely")
         esm_raw_dim = 0
+        esm_pca_actual = 0
         del all_esm_joint
         gc.collect()
 
@@ -436,9 +526,12 @@ def load_and_combine():
     print(f"    FPocket:    {FPOCKET_DIM}")
     print(f"    AAindex:    {AAINDEX_DIM}")
     print(f"    TE:         {TE_DIM}")
+    print(f"    PRS:        {PRS_DIM}")
+    print(f"    MJ energy:  {MJ_DIM}")
+    print(f"    Frustration:{FRUST_DIM}")
     if has_esm:
         esm_desc = '+'.join(esm_parts)
-        print(f"    ESM PCA:    {ESM_PCA_DIM} (from {esm_desc}, raw {esm_raw_dim}-dim)")
+        print(f"    ESM PCA:    {esm_pca_actual} (from {esm_desc}, raw {esm_raw_dim}-dim)")
 
     # Save hybrid dataset
     output_path = os.path.join(OUTPUT_DIR, "dataset.h5")
@@ -453,8 +546,11 @@ def load_and_combine():
         f.attrs['n_nma_graph_features'] = NMA_GRAPH_DIM
         f.attrs['n_aaindex_features'] = AAINDEX_DIM
         f.attrs['n_te_features'] = TE_DIM
+        f.attrs['n_prs_features'] = PRS_DIM
+        f.attrs['n_mj_features'] = MJ_DIM
+        f.attrs['n_frust_features'] = FRUST_DIM
         f.attrs['n_fpocket_features'] = FPOCKET_DIM
-        f.attrs['n_esm_features'] = ESM_PCA_DIM if has_esm else 0
+        f.attrs['n_esm_features'] = esm_pca_actual if has_esm else 0
         f.attrs['esm_raw_dim'] = esm_raw_dim
         f.attrs['has_esm650'] = has_esm650
         f.attrs['has_esm3b'] = has_esm3b

@@ -35,7 +35,8 @@ warnings.filterwarnings('ignore')
 import prody
 prody.confProDy(verbosity='none')
 
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PDB_DIR = os.path.join(DATA_DIR, "pdb_files")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 FEATURES_DIR = os.path.join(DATA_DIR, "..", "features")
@@ -75,9 +76,9 @@ def get_residues_and_coords(pdb_path):
     ca_coords = []
     for chain in model:
         for res in chain:
-            if res.id[0] != ' ':
-                continue
             resname = res.get_resname()
+            if res.id[0] != ' ' and resname not in NONSTANDARD_MAP:
+                continue
             if resname in NONSTANDARD_MAP:
                 resname = NONSTANDARD_MAP[resname]
             if resname not in AA_LIST:
@@ -96,7 +97,7 @@ def get_residues_and_coords(pdb_path):
                 if atoms:
                     ca_coords.append(np.mean([a.get_vector().get_array() for a in atoms], axis=0))
                 else:
-                    ca_coords.append(np.array([0.0, 0.0, 0.0]))
+                    ca_coords.append(np.array([99999.0, 99999.0, 99999.0]))
 
     return residues, np.array(ca_coords)
 
@@ -113,7 +114,10 @@ def extract_nma_features(ca_coords):
         # GNM (Gaussian Network Model) — simpler, faster, 1D fluctuations
         gnm = prody.GNM('protein')
         gnm.buildKirchhoff(ca_coords, cutoff=10.0)
-        gnm.calcModes(n_modes=min(20, n - 1))
+        # Calculate ALL non-trivial GNM modes so fast_mode_contrib
+        # indexes true fast modes (not the 20th-slowest mode).
+        # GNM Kirchhoff is NxN — fast even for large proteins.
+        gnm.calcModes(n_modes=n - 1)
 
         gnm_fluct = prody.calcSqFlucts(gnm)
         features[:, 1] = gnm_fluct  # GNM fluctuation
@@ -180,7 +184,7 @@ def extract_graph_features(ca_coords, contact_cutoff=8.0):
 
         # Betweenness centrality (approximate for large proteins to avoid O(VE) stall)
         k_approx = min(n, 200) if n > 500 else None
-        bc = nx.betweenness_centrality(G, k=k_approx)
+        bc = nx.betweenness_centrality(G, k=k_approx, seed=42)
         for i in range(n):
             features[i, 0] = bc.get(i, 0.0)
 
@@ -231,7 +235,7 @@ def process_single_protein(args):
         all_feat = np.concatenate([nma_feat, graph_feat], axis=1)  # (N, 11)
 
         # Align with labels (same as extract_features.py — drop unmatched)
-        labels_df = pd.read_csv(label_path)
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
 
         feat_lookup = {}
         for i, info in enumerate(residues):
@@ -244,7 +248,9 @@ def process_single_protein(args):
             key = (lrow['chain'], lrow['resnum'])
             if key in feat_lookup:
                 aligned_features.append(all_feat[feat_lookup[key]])
-                aligned_labels.append(lrow['is_allosteric'])
+            else:
+                aligned_features.append(np.zeros(len(ALL_FEATURE_NAMES), dtype=np.float32))
+            aligned_labels.append(lrow['is_allosteric'])
 
         if len(aligned_features) == 0:
             return pdb_id, 'failed', 'no alignment'
@@ -279,7 +285,8 @@ if __name__ == '__main__':
         output_path = os.path.join(NMA_DIR, f"{pdb_id}_nma_graph.npz")
         tasks.append((pdb_id, pdb_path, label_path, output_path))
 
-    n_workers = max(1, cpu_count() - 1)  # Leave 1 core free
+    # Use physical cores only; cap at 48
+    n_workers = min(max(1, cpu_count() - 1), 48)
     print(f"Using {n_workers} worker processes\n")
 
     start_time = time.time()

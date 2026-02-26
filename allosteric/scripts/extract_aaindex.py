@@ -25,7 +25,8 @@ import numpy as np
 import pandas as pd
 from multiprocessing import Pool, cpu_count
 
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 FEATURES_DIR = os.path.join(DATA_DIR, "..", "features", "aaindex")
 os.makedirs(FEATURES_DIR, exist_ok=True)
@@ -121,7 +122,7 @@ def process_protein(pdb_id):
     if not os.path.exists(label_path):
         return pdb_id, 'fail', 'no labels'
 
-    labels_df = pd.read_csv(label_path)
+    labels_df = pd.read_csv(label_path, dtype={'chain': str})
     n_res = len(labels_df)
     features = np.zeros((n_res, N_FEATURES), dtype=np.float32)
 

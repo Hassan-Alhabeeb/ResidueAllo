@@ -40,7 +40,7 @@ import prody
 prody.confProDy(verbosity='none')
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR = r"E:\newyear\research_plan\allosteric"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
 DATA_DIR = os.path.join(BASE_DIR, "data")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 FEATURES_DIR = os.path.join(BASE_DIR, "features")
@@ -82,9 +82,9 @@ def get_residues_and_coords(pdb_path):
     ca_coords = []
     for chain in model:
         for res in chain:
-            if res.id[0] != ' ':
-                continue
             resname = res.get_resname()
+            if res.id[0] != ' ' and resname not in NONSTANDARD_MAP:
+                continue
             if resname in NONSTANDARD_MAP:
                 resname = NONSTANDARD_MAP[resname]
             if resname not in AA_LIST:
@@ -103,7 +103,7 @@ def get_residues_and_coords(pdb_path):
                 if atoms:
                     ca_coords.append(np.mean([a.get_vector().get_array() for a in atoms], axis=0))
                 else:
-                    ca_coords.append(np.array([0.0, 0.0, 0.0]))
+                    ca_coords.append(np.array([99999.0, 99999.0, 99999.0]))
 
     return residues, np.array(ca_coords)
 
@@ -157,7 +157,8 @@ def compute_te_features(ca_coords):
     Ctau = (eigenvectors * exp_decay) @ eigenvectors.T                 # (N, N)
 
     # Step 3: Compute TE matrix using AllosES 4-term formula
-    # TE[i,j] = TE(j -> i) = 0.5 * [log(term_a) - log(term_b) - log(term_f) + log(term_g)]
+    # TE[i,j] = T(i -> j) = 0.5 * [log(term_a) - log(term_b) - log(term_f) + log(term_g)]
+    # term_a uses C0_jj (target j), so TE[i,j] = transfer entropy FROM i TO j
     eps = 1e-30
 
     C0_diag = np.diag(C0)             # (N,)
@@ -202,21 +203,21 @@ def compute_te_features(ca_coords):
     np.fill_diagonal(TE, 0.0)
 
     # Step 4: Per-residue features
-    # NTE[i,j] = TE[i,j] - TE[j,i] = TE(j->i) - TE(i->j)
+    # NTE[i,j] = TE[i,j] - TE[j,i] = T(i->j) - T(j->i)
     NTE = TE - TE.T
 
-    # nte_score: normalized net TE (positive = net receiver, negative = net sender)
-    nte_sum = NTE.sum(axis=1)  # sum over j for each i
+    # nte_score: normalized net TE (positive = net sender, negative = net receiver)
+    nte_sum = NTE.sum(axis=1)  # sum over j for each i: sum_j (T(i->j) - T(j->i))
     max_abs = np.max(np.abs(nte_sum))
     if max_abs > 0:
         features[:, 0] = nte_sum / max_abs  # normalized to [-1, 1]
     # else: stays as zeros
 
-    # te_out_sum: total TE sent by residue i = sum_j TE(i->j) = column sum of TE
-    features[:, 1] = TE.sum(axis=0)  # axis=0 col sum: sum_j TE[j,i] = sum_j TE(i->j)
+    # te_out_sum: total TE sent by residue i = sum_j T(i->j) = row sum of TE
+    features[:, 1] = TE.sum(axis=1)  # axis=1 row sum: sum_j TE[i,j] = sum_j T(i->j)
 
-    # te_in_sum: total TE received by residue i = sum_j TE(j->i) = row sum of TE
-    features[:, 2] = TE.sum(axis=1)  # axis=1 row sum: sum_j TE[i,j] = sum_j TE(j->i)
+    # te_in_sum: total TE received by residue i = sum_j T(j->i) = column sum of TE
+    features[:, 2] = TE.sum(axis=0)  # axis=0 col sum: sum_i TE[i,j] = sum_i T(i->j) = received by j
 
     # Final safeguard
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
@@ -243,7 +244,7 @@ def process_single_protein(args):
         te_feat = compute_te_features(ca_coords)  # (N, 3)
 
         # Align with labels
-        labels_df = pd.read_csv(label_path)
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
 
         feat_lookup = {}
         for i, info in enumerate(residues):
@@ -351,7 +352,8 @@ def main():
     if n_existing > 0:
         print(f"  Already done: {n_existing} (will skip)")
 
-    n_workers = max(1, cpu_count() - 2)  # Leave 2 cores free (TE is CPU-heavy)
+    # Use physical cores only; cap at 48
+    n_workers = min(max(1, cpu_count() - 2), 48)
     print(f"  Workers: {n_workers}\n")
 
     start_time = time.time()

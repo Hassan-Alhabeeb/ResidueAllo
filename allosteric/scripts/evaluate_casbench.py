@@ -10,6 +10,9 @@ Phases (run sequentially or individually):
   3. features  — Extract structural + NMA + graph + AAindex features
   4. fpocket   — Extract FPocket pocket geometry via WSL
   4b. te       — Extract Transfer Entropy features (AllosES algorithm)
+  4c. prs      — Extract PRS features (Atilgan & Atilgan 2009)
+  4d. mj       — Extract MJ contact energy features (Miyazawa & Jernigan 1996)
+  4e. frustration — Extract local frustration features (Ferreiro 2007/2011)
   5. esm2      — Extract ESM-2 650M embeddings (GPU)
   6. predict   — Load saved model, assemble features, predict, evaluate
 
@@ -21,6 +24,7 @@ Usage:
 
 import os
 import sys
+import re
 import glob
 import time
 import argparse
@@ -38,7 +42,7 @@ warnings.filterwarnings('ignore')
 # ============================================================
 # Paths
 # ============================================================
-BASE_DIR = r"E:\newyear\research_plan\allosteric"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
 CASBENCH_ROOT = os.path.join(BASE_DIR, "data", "raw", "casbench", "CASBench_Download")
 SPLITS_CSV = os.path.join(BASE_DIR, "data", "processed", "train_val_test_splits.csv")
 
@@ -137,6 +141,9 @@ NMA_GRAPH_DIM = 11
 FPOCKET_DIM = 8
 AAINDEX_DIM = 6
 TE_DIM = 3
+PRS_DIM = 3
+MJ_DIM = 2
+FRUST_DIM = 7
 ESM_650M_DIM = 1280
 ESM_3B_DIM = 2560
 ESM_JOINT_DIM = ESM_650M_DIM + ESM_3B_DIM  # 3840
@@ -284,8 +291,12 @@ def parse_sites_file(filepath):
             # parts: [SITE_LABEL, ResName, Chain, Resnum]
             chain = parts[2]
             try:
-                resnum = int(parts[3])
-            except ValueError:
+                # Strip insertion codes (e.g., "106A" -> 106)
+                match = re.match(r'-?\d+', parts[3])
+                if not match:
+                    continue
+                resnum = int(match.group())
+            except (ValueError, AttributeError):
                 continue
             sites.add((chain, resnum))
 
@@ -313,9 +324,9 @@ def extract_labels_for_protein(pdb_path, pdb_dir, pdb_id):
     rows = []
     for chain in model:
         for res in chain:
-            if res.id[0] != ' ':
-                continue
             resname = res.get_resname()
+            if res.id[0] != ' ' and resname not in NONSTANDARD_MAP:
+                continue
             if resname in NONSTANDARD_MAP:
                 resname = NONSTANDARD_MAP[resname]
             if resname not in AA_LIST:
@@ -418,7 +429,7 @@ def _process_single_features(args):
         from extract_nma_graph import extract_nma_features, extract_graph_features, get_residues_and_coords
         from extract_aaindex import PROPERTY_TABLES, NORM_PARAMS, NONSTANDARD_MAP as AAINDEX_NONSTANDARD
 
-        labels_df = pd.read_csv(label_path)
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
 
         # --- Structural features (64-dim) ---
         struct_features, res_info = extract_all_features(pdb_id, pdb_path)
@@ -504,7 +515,7 @@ def phase_features():
 
     from multiprocessing import Pool
 
-    N_WORKERS = 20  # 12 cores / 24 threads — use 20 to keep system responsive
+    N_WORKERS = min(max(1, os.cpu_count() - 2), 48)
 
     pdb_list = load_independent_pdbs()
     print(f"  Proteins to process: {len(pdb_list)}")
@@ -625,7 +636,7 @@ def _process_single_fpocket(args):
                 features[i, 7] = len(pocket_list)
 
         # Align with labels
-        labels_df = pd.read_csv(label_path)
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
         fp_lookup = {}
         for i, key in enumerate(keys):
             fp_lookup[(key[0], key[1])] = i
@@ -657,16 +668,26 @@ def phase_fpocket():
     from multiprocessing import Pool
     import subprocess
 
-    N_WORKERS = 20  # 24 threads — use 20, leave 4 for system
+    N_WORKERS = min(max(1, os.cpu_count() - 2), 48)
 
-    # Test WSL + fpocket
-    print("  Testing WSL + fpocket...")
-    result = subprocess.run(
-        ["wsl", "-d", "Ubuntu", "--", "bash", "-c", "fpocket 2>&1 | head -1"],
-        capture_output=True, text=True, timeout=10
-    )
-    if "POCKET" not in result.stdout.upper() and "fpocket" not in result.stdout.lower():
-        print("ERROR: fpocket not available in WSL!")
+    # Test fpocket
+    import platform
+    if platform.system() == 'Linux':
+        print("  Testing fpocket (native Linux)...")
+        result = subprocess.run(
+            ["bash", "-c", "fpocket 2>&1 | head -1"],
+            capture_output=True, text=True, timeout=10
+        )
+    else:
+        print("  Testing WSL + fpocket...")
+        result = subprocess.run(
+            ["wsl", "-d", "Ubuntu", "--", "bash", "-c", "fpocket 2>&1 | head -1"],
+            capture_output=True, text=True, timeout=10
+        )
+    if "POCKET" not in result.stdout.upper():
+        print("ERROR: fpocket not available!")
+        print(f"  stdout: {result.stdout}")
+        print(f"  stderr: {result.stderr}")
         sys.exit(1)
     print("  fpocket OK")
     print(f"  Workers: {N_WORKERS}")
@@ -748,7 +769,7 @@ def _process_single_te(args):
             return pdb_id, 'fail', 'no residues'
 
         te_feat = compute_te_features(ca_coords)
-        labels_df = pd.read_csv(label_path)
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
 
         feat_lookup = {}
         for i, info in enumerate(residues):
@@ -802,6 +823,295 @@ def phase_te():
 
     with Pool(processes=N_WORKERS) as pool:
         for pdb_id, status, msg in pool.imap_unordered(_process_single_te, tasks, chunksize=4):
+            if status == 'ok':
+                n_ok += 1
+            elif status == 'skip':
+                n_skip += 1
+            elif status == 'fail':
+                n_fail += 1
+                if len(fail_msgs) < 10:
+                    fail_msgs.append(f"{pdb_id}: {msg}")
+
+            total_done = n_ok + n_skip + n_fail
+            if total_done % 200 == 0 and total_done > 0:
+                elapsed = time.time() - start_time
+                rate = max(n_ok, 1) / max(elapsed, 1)
+                remaining = (len(tasks) - total_done) / max(rate, 0.01)
+                print(f"  [{total_done}/{len(tasks)}] ok={n_ok} skip={n_skip} fail={n_fail} "
+                      f"({elapsed:.0f}s, ~{remaining:.0f}s remaining)")
+
+    elapsed = time.time() - start_time
+    print(f"\n  Results ({elapsed:.0f}s):")
+    print(f"    New:     {n_ok}")
+    print(f"    Skipped: {n_skip}")
+    print(f"    Failed:  {n_fail}")
+    if fail_msgs:
+        print(f"    First errors:")
+        for msg in fail_msgs:
+            print(f"      {msg}")
+    print("=" * 60)
+    stop_logging()
+
+
+# ============================================================
+# Phase 4c: PRS Features
+# ============================================================
+
+def _process_single_prs(args):
+    """Worker function for parallel PRS extraction. Must be top-level for pickling on Windows."""
+    pdb_id, pdb_path, label_path, out_path = args
+    if os.path.exists(out_path):
+        return pdb_id, 'skip', None
+    if not os.path.exists(label_path):
+        return pdb_id, 'fail', 'no labels'
+    try:
+        from extract_prs import (
+            compute_prs_features, get_residues_and_coords as prs_get_residues,
+            PRS_DIM as PRS_FEAT_DIM, PRS_FEATURE_NAMES
+        )
+
+        residues, ca_coords = prs_get_residues(pdb_path)
+        if len(residues) == 0:
+            return pdb_id, 'fail', 'no residues'
+
+        prs_feat = compute_prs_features(ca_coords)
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
+
+        feat_lookup = {}
+        for i, info in enumerate(residues):
+            feat_lookup[(info['chain'], info['resnum'])] = i
+
+        aligned = np.zeros((len(labels_df), PRS_FEAT_DIM), dtype=np.float32)
+        for j, lrow in labels_df.iterrows():
+            key = (lrow['chain'], lrow['resnum'])
+            if key in feat_lookup:
+                aligned[j] = prs_feat[feat_lookup[key]]
+
+        np.savez_compressed(out_path, features=aligned, feature_names=PRS_FEATURE_NAMES)
+        return pdb_id, 'ok', f'{len(labels_df)} res'
+    except Exception as e:
+        return pdb_id, 'fail', str(e)
+
+
+def phase_prs():
+    """Extract PRS features for CASBench proteins."""
+    start_logging("prs")
+    print("=" * 60)
+    print("  Phase 4c: PRS Feature Extraction")
+    print("  Algorithm: Atilgan & Atilgan, PLoS Comp Bio 2009")
+    print("=" * 60)
+
+    from multiprocessing import Pool
+
+    pdb_list = load_independent_pdbs()
+    print(f"  Proteins to process: {len(pdb_list)}")
+
+    N_WORKERS = max(1, os.cpu_count() - 2)
+
+    tasks = []
+    for _, row in pdb_list.iterrows():
+        pdb_id = row['pdb_id']
+        pdb_path = row['pdb_path']
+        label_path = os.path.join(CASBENCH_LABELS_DIR, f"{pdb_id}_labels.csv")
+        out_path = os.path.join(CASBENCH_FEATURES_DIR, f"{pdb_id}_prs.npz")
+        tasks.append((pdb_id, pdb_path, label_path, out_path))
+
+    n_existing = sum(1 for _, _, _, op in tasks if os.path.exists(op))
+    if n_existing > 0:
+        print(f"  Already done: {n_existing} (will skip)")
+    print(f"  Workers: {N_WORKERS}")
+
+    n_ok = 0
+    n_skip = 0
+    n_fail = 0
+    fail_msgs = []
+    start_time = time.time()
+
+    with Pool(processes=N_WORKERS) as pool:
+        for pdb_id, status, msg in pool.imap_unordered(_process_single_prs, tasks, chunksize=4):
+            if status == 'ok':
+                n_ok += 1
+            elif status == 'skip':
+                n_skip += 1
+            elif status == 'fail':
+                n_fail += 1
+                if len(fail_msgs) < 10:
+                    fail_msgs.append(f"{pdb_id}: {msg}")
+
+            total_done = n_ok + n_skip + n_fail
+            if total_done % 200 == 0 and total_done > 0:
+                elapsed = time.time() - start_time
+                rate = max(n_ok, 1) / max(elapsed, 1)
+                remaining = (len(tasks) - total_done) / max(rate, 0.01)
+                print(f"  [{total_done}/{len(tasks)}] ok={n_ok} skip={n_skip} fail={n_fail} "
+                      f"({elapsed:.0f}s, ~{remaining:.0f}s remaining)")
+
+    elapsed = time.time() - start_time
+    print(f"\n  Results ({elapsed:.0f}s):")
+    print(f"    New:     {n_ok}")
+    print(f"    Skipped: {n_skip}")
+    print(f"    Failed:  {n_fail}")
+    if fail_msgs:
+        print(f"    First errors:")
+        for msg in fail_msgs:
+            print(f"      {msg}")
+    print("=" * 60)
+    stop_logging()
+
+
+# ============================================================
+# Phase 4d: MJ Contact Energy Extraction
+# ============================================================
+
+def _process_single_mj(args):
+    """Worker function for parallel MJ extraction."""
+    pdb_id, pdb_path, label_path, out_path = args
+    if os.path.exists(out_path):
+        return pdb_id, 'skip', None
+    if not os.path.exists(label_path):
+        return pdb_id, 'fail', 'no labels'
+    try:
+        from extract_mj_energy import extract_mj_features, MJ_DIM as MJ_FEAT_DIM
+
+        features = extract_mj_features(pdb_path, label_path)
+        if features is None:
+            return pdb_id, 'fail', 'extraction failed'
+
+        np.savez_compressed(out_path, features=features)
+        return pdb_id, 'ok', f'{len(features)} res'
+    except Exception as e:
+        return pdb_id, 'fail', str(e)
+
+
+def phase_mj():
+    """Extract MJ contact energy features for CASBench proteins."""
+    start_logging("mj")
+    print("=" * 60)
+    print("  Phase 4d: MJ Contact Energy Feature Extraction")
+    print("  Miyazawa & Jernigan, J Mol Biol 1996")
+    print("=" * 60)
+
+    from multiprocessing import Pool
+
+    pdb_list = load_independent_pdbs()
+    print(f"  Proteins to process: {len(pdb_list)}")
+
+    N_WORKERS = min(max(1, os.cpu_count() - 2), 48)
+
+    tasks = []
+    for _, row in pdb_list.iterrows():
+        pdb_id = row['pdb_id']
+        pdb_path = row['pdb_path']
+        label_path = os.path.join(CASBENCH_LABELS_DIR, f"{pdb_id}_labels.csv")
+        out_path = os.path.join(CASBENCH_FEATURES_DIR, f"{pdb_id}_mj.npz")
+        tasks.append((pdb_id, pdb_path, label_path, out_path))
+
+    n_existing = sum(1 for _, _, _, op in tasks if os.path.exists(op))
+    if n_existing > 0:
+        print(f"  Already done: {n_existing} (will skip)")
+    print(f"  Workers: {N_WORKERS}")
+
+    n_ok = 0
+    n_skip = 0
+    n_fail = 0
+    fail_msgs = []
+    start_time = time.time()
+
+    with Pool(processes=N_WORKERS) as pool:
+        for pdb_id, status, msg in pool.imap_unordered(_process_single_mj, tasks, chunksize=4):
+            if status == 'ok':
+                n_ok += 1
+            elif status == 'skip':
+                n_skip += 1
+            elif status == 'fail':
+                n_fail += 1
+                if len(fail_msgs) < 10:
+                    fail_msgs.append(f"{pdb_id}: {msg}")
+
+            total_done = n_ok + n_skip + n_fail
+            if total_done % 200 == 0 and total_done > 0:
+                elapsed = time.time() - start_time
+                rate = max(n_ok, 1) / max(elapsed, 1)
+                remaining = (len(tasks) - total_done) / max(rate, 0.01)
+                print(f"  [{total_done}/{len(tasks)}] ok={n_ok} skip={n_skip} fail={n_fail} "
+                      f"({elapsed:.0f}s, ~{remaining:.0f}s remaining)")
+
+    elapsed = time.time() - start_time
+    print(f"\n  Results ({elapsed:.0f}s):")
+    print(f"    New:     {n_ok}")
+    print(f"    Skipped: {n_skip}")
+    print(f"    Failed:  {n_fail}")
+    if fail_msgs:
+        print(f"    First errors:")
+        for msg in fail_msgs:
+            print(f"      {msg}")
+    print("=" * 60)
+    stop_logging()
+
+
+# ============================================================
+# Phase 4e: Local Frustration Extraction
+# ============================================================
+
+def _process_single_frust(args):
+    """Worker function for parallel frustration extraction."""
+    pdb_id, pdb_path, label_path, out_path = args
+    if os.path.exists(out_path):
+        return pdb_id, 'skip', None
+    if not os.path.exists(label_path):
+        return pdb_id, 'fail', 'no labels'
+    try:
+        from extract_local_frustration import extract_frustration_fallback, FRUST_DIM_CONFIG
+
+        features = extract_frustration_fallback(pdb_path, label_path)
+        if features is None:
+            return pdb_id, 'fail', 'extraction failed'
+
+        labels_df = pd.read_csv(label_path, dtype={'chain': str})
+        labels = labels_df['is_allosteric'].values
+
+        np.savez_compressed(out_path, features=features, labels=labels, pdb_id=pdb_id)
+        return pdb_id, 'ok', f'{len(features)} res'
+    except Exception as e:
+        return pdb_id, 'fail', str(e)
+
+
+def phase_frustration():
+    """Extract local frustration features for CASBench proteins."""
+    start_logging("frustration")
+    print("=" * 60)
+    print("  Phase 4e: Local Frustration Feature Extraction")
+    print("  Ferreiro et al., PNAS 2007, 2011")
+    print("=" * 60)
+
+    from multiprocessing import Pool
+
+    pdb_list = load_independent_pdbs()
+    print(f"  Proteins to process: {len(pdb_list)}")
+
+    N_WORKERS = min(max(1, os.cpu_count() - 2), 48)
+
+    tasks = []
+    for _, row in pdb_list.iterrows():
+        pdb_id = row['pdb_id']
+        pdb_path = row['pdb_path']
+        label_path = os.path.join(CASBENCH_LABELS_DIR, f"{pdb_id}_labels.csv")
+        out_path = os.path.join(CASBENCH_FEATURES_DIR, f"{pdb_id}_frust.npz")
+        tasks.append((pdb_id, pdb_path, label_path, out_path))
+
+    n_existing = sum(1 for _, _, _, op in tasks if os.path.exists(op))
+    if n_existing > 0:
+        print(f"  Already done: {n_existing} (will skip)")
+    print(f"  Workers: {N_WORKERS}")
+
+    n_ok = 0
+    n_skip = 0
+    n_fail = 0
+    fail_msgs = []
+    start_time = time.time()
+
+    with Pool(processes=N_WORKERS) as pool:
+        for pdb_id, status, msg in pool.imap_unordered(_process_single_frust, tasks, chunksize=4):
             if status == 'ok':
                 n_ok += 1
             elif status == 'skip':
@@ -916,7 +1226,7 @@ def phase_esm2():
                 n_fail += 1
                 continue
 
-            labels_df = pd.read_csv(label_path)
+            labels_df = pd.read_csv(label_path, dtype={'chain': str})
 
             # Build lookup: (chain, resnum) -> embedding vector
             emb_lookup = {}
@@ -1012,21 +1322,40 @@ def phase_predict():
     print(f"  Scaler expects: {n_scaler_features} structural features")
     print(f"  PCA expects: {n_pca_input} -> {n_pca_output} ESM features")
 
+    # Safety check: CASBench only has 650M embeddings
+    if n_pca_input > ESM_650M_DIM:
+        print(f"ERROR: Model was trained on joint 650M+3B embeddings (PCA input={n_pca_input}).")
+        print(f"  CASBench only has 650M. Retrain with: python build_dataset.py --esm-650m-only")
+        stop_logging()
+        sys.exit(1)
+
     # Determine which optional features are included in the scaler
-    # Scaler was fit on structural(64) + NMA(11) + FPocket(8) + maybe AAindex(6) + maybe TE(3)
+    # Scaler was fit on structural(64) + NMA(11) + FPocket(8) + maybe AAindex(6) + TE(3) + PRS(3) + MJ(2) + Frust(7)
     base_dim = STRUCTURAL_DIM + NMA_GRAPH_DIM + FPOCKET_DIM  # 83
     has_aaindex_in_scaler = (n_scaler_features >= base_dim + AAINDEX_DIM)
     has_te_in_scaler = (n_scaler_features >= base_dim + AAINDEX_DIM + TE_DIM)
+    has_prs_in_scaler = (n_scaler_features >= base_dim + AAINDEX_DIM + TE_DIM + PRS_DIM)
+    has_mj_in_scaler = (n_scaler_features >= base_dim + AAINDEX_DIM + TE_DIM + PRS_DIM + MJ_DIM)
+    has_frust_in_scaler = (n_scaler_features >= base_dim + AAINDEX_DIM + TE_DIM + PRS_DIM + MJ_DIM + FRUST_DIM)
 
-    if has_te_in_scaler:
+    if has_frust_in_scaler:
+        print(f"  AAindex + TE + PRS + MJ + Frust: included in scaler ({n_scaler_features} = 64+11+8+6+3+3+2+7)")
+    elif has_mj_in_scaler:
+        print(f"  AAindex + TE + PRS + MJ: included in scaler ({n_scaler_features} = 64+11+8+6+3+3+2)")
+    elif has_prs_in_scaler:
+        print(f"  AAindex + TE + PRS: included in scaler ({n_scaler_features} = 64+11+8+6+3+3)")
+    elif has_te_in_scaler:
         print(f"  AAindex + TE: included in scaler ({n_scaler_features} = 64+11+8+6+3)")
     elif has_aaindex_in_scaler:
         print(f"  AAindex: included in scaler ({n_scaler_features} = 64+11+8+6)")
     else:
         print(f"  AAindex: NOT in scaler ({n_scaler_features} = 64+11+8)")
 
-    # Load saved threshold from training results
-    results_path = os.path.join(RESULTS_DIR, "xgboost_hybrid_results.json")
+    # Load saved threshold from training results (match model file)
+    if "tuned" in model_path:
+        results_path = os.path.join(RESULTS_DIR, "xgboost_tuned_results.json")
+    else:
+        results_path = os.path.join(RESULTS_DIR, "xgboost_hybrid_results.json")
     threshold = 0.5
     if os.path.exists(results_path):
         with open(results_path, 'r') as f:
@@ -1093,7 +1422,50 @@ def phase_predict():
             else:
                 te_feat = np.zeros((n_res, TE_DIM), dtype=np.float32)
 
-            if has_te_in_scaler:
+            # Load PRS features (3-dim)
+            prs_path = os.path.join(CASBENCH_FEATURES_DIR, f"{pdb_id}_prs.npz")
+            if os.path.exists(prs_path):
+                prs_data = np.load(prs_path)
+                prs_feat = prs_data['features']
+                if len(prs_feat) != n_res:
+                    prs_feat = np.zeros((n_res, PRS_DIM), dtype=np.float32)
+            else:
+                prs_feat = np.zeros((n_res, PRS_DIM), dtype=np.float32)
+
+            # Load MJ features (2-dim)
+            mj_path = os.path.join(CASBENCH_FEATURES_DIR, f"{pdb_id}_mj.npz")
+            if os.path.exists(mj_path):
+                mj_data = np.load(mj_path)
+                mj_feat = mj_data['features']
+                if len(mj_feat) != n_res:
+                    mj_feat = np.zeros((n_res, MJ_DIM), dtype=np.float32)
+            else:
+                mj_feat = np.zeros((n_res, MJ_DIM), dtype=np.float32)
+
+            # Load Frustration features (up to 7-dim)
+            frust_path = os.path.join(CASBENCH_FEATURES_DIR, f"{pdb_id}_frust.npz")
+            if os.path.exists(frust_path):
+                frust_data = np.load(frust_path)
+                frust_feat = frust_data['features']
+                if len(frust_feat) != n_res:
+                    frust_feat = np.zeros((n_res, FRUST_DIM), dtype=np.float32)
+                elif frust_feat.shape[1] < FRUST_DIM:
+                    # Zero-pad if only configurational (4-dim → 7-dim)
+                    pad_cols = FRUST_DIM - frust_feat.shape[1]
+                    frust_feat = np.concatenate([frust_feat, np.zeros((n_res, pad_cols), dtype=np.float32)], axis=1)
+            else:
+                frust_feat = np.zeros((n_res, FRUST_DIM), dtype=np.float32)
+
+            if has_frust_in_scaler:
+                # Scaler expects: structural(64) + NMA(11) + FPocket(8) + AAindex(6) + TE(3) + PRS(3) + MJ(2) + Frust(7) = 104
+                combined_structural = np.concatenate([struct_base, fp_feat, aaindex_part, te_feat, prs_feat, mj_feat, frust_feat], axis=1)
+            elif has_mj_in_scaler:
+                # Scaler expects: structural(64) + NMA(11) + FPocket(8) + AAindex(6) + TE(3) + PRS(3) + MJ(2) = 97
+                combined_structural = np.concatenate([struct_base, fp_feat, aaindex_part, te_feat, prs_feat, mj_feat], axis=1)
+            elif has_prs_in_scaler:
+                # Scaler expects: structural(64) + NMA(11) + FPocket(8) + AAindex(6) + TE(3) + PRS(3) = 95
+                combined_structural = np.concatenate([struct_base, fp_feat, aaindex_part, te_feat, prs_feat], axis=1)
+            elif has_te_in_scaler:
                 # Scaler expects: structural(64) + NMA(11) + FPocket(8) + AAindex(6) + TE(3) = 92
                 combined_structural = np.concatenate([struct_base, fp_feat, aaindex_part, te_feat], axis=1)
             elif has_aaindex_in_scaler:
@@ -1424,6 +1796,7 @@ def phase_predict():
             'n_pca_input': int(n_pca_input),
             'n_pca_output': int(n_pca_output),
             'has_aaindex': has_aaindex_in_scaler,
+            'has_frustration': has_frust_in_scaler,
         },
         'homology_stratified': homology_stratified,
     }
@@ -1446,7 +1819,7 @@ def phase_predict():
 def main():
     parser = argparse.ArgumentParser(description="CASBench Blind Evaluation Pipeline")
     parser.add_argument('--phase', type=str, default='all',
-                        choices=['all', 'discover', 'labels', 'features', 'fpocket', 'te', 'esm2', 'predict'],
+                        choices=['all', 'discover', 'labels', 'features', 'fpocket', 'te', 'prs', 'mj', 'frustration', 'esm2', 'predict'],
                         help='Which phase to run (default: all)')
     args = parser.parse_args()
 
@@ -1456,6 +1829,9 @@ def main():
         'features': phase_features,
         'fpocket': phase_fpocket,
         'te': phase_te,
+        'prs': phase_prs,
+        'mj': phase_mj,
+        'frustration': phase_frustration,
         'esm2': phase_esm2,
         'predict': phase_predict,
     }

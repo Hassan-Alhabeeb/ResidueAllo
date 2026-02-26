@@ -16,18 +16,23 @@ FIXES from Opus review:
   - Filter to standard AA only (match extract_features.py residue set)
   - Add __name__ guard
   - Division-by-zero guard on final summary
+  - Multiprocessing via Pool for parallel PDB parsing
 """
 
 import os
 import ast
 import re
+import time
 import pandas as pd
 import numpy as np
 from Bio.PDB import PDBParser
 import warnings
+from multiprocessing import Pool, cpu_count
+
 warnings.filterwarnings('ignore')
 
-DATA_DIR = r"E:\newyear\research_plan\allosteric\data"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/../ = allosteric/
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PDB_DIR = os.path.join(DATA_DIR, "pdb_files")
 CSV_PATH = os.path.join(DATA_DIR, "raw", "allobench", "AlloBench.csv")
 OUTPUT_DIR = os.path.join(DATA_DIR, "processed")
@@ -118,10 +123,10 @@ def extract_residues_from_pdb(pdb_path):
     for chain in model:
         for residue in chain:
             hetflag = residue.id[0]
-            if hetflag != ' ':
+            resname = residue.get_resname()
+            if hetflag != ' ' and resname not in NONSTANDARD_MAP:
                 continue
             resnum = residue.id[1]
-            resname = residue.get_resname()
 
             # Map non-standard to standard
             if resname in NONSTANDARD_MAP:
@@ -141,6 +146,55 @@ def extract_residues_from_pdb(pdb_path):
     return residues
 
 
+def process_single_protein(args):
+    """Process a single protein — designed for multiprocessing Pool."""
+    pdb_id, pdb_path, allosteric_set, active_set, group_metadata, output_path = args
+
+    if not os.path.exists(pdb_path):
+        return pdb_id, 'skipped_no_pdb', None
+
+    residue_list = extract_residues_from_pdb(pdb_path)
+    if residue_list is None or len(residue_list) == 0:
+        return pdb_id, 'skipped_parse_error', None
+
+    # Create per-residue labels
+    records = []
+    for res in residue_list:
+        chain = res['chain']
+        resnum = res['resnum']
+        resname = res['resname']
+
+        is_allo = 1 if (chain, resnum) in allosteric_set else 0
+        # Active site: no chain info in AlloBench, match by resnum only (documented limitation)
+        is_active = 1 if resnum in active_set else 0
+
+        records.append({
+            'chain': chain,
+            'resnum': resnum,
+            'resname': resname,
+            'is_allosteric': is_allo,
+            'is_active_site': is_active
+        })
+
+    res_df = pd.DataFrame(records)
+    res_df.to_csv(output_path, index=False)
+
+    n_allo = int(res_df['is_allosteric'].sum())
+    n_active = int(res_df['is_active_site'].sum())
+    n_total = len(res_df)
+
+    summary = {
+        'pdb_id': pdb_id,
+        'n_residues': n_total,
+        'n_allosteric': n_allo,
+        'n_active_site': n_active,
+        'pct_allosteric': round(100 * n_allo / n_total, 1) if n_total > 0 else 0,
+        **group_metadata
+    }
+
+    return pdb_id, 'success', summary
+
+
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -155,94 +209,72 @@ def main():
     grouped = df.groupby('allosteric_pdb')
     print(f"  Unique PDB structures: {len(grouped)}")
 
+    # Pre-compute per-PDB allosteric/active sets and metadata (fast, single-threaded)
+    tasks = []
+    for pdb_id, group in grouped:
+        pdb_id = pdb_id.strip().upper()
+        pdb_path = os.path.join(PDB_DIR, f"{pdb_id}.pdb")
+        output_path = os.path.join(OUTPUT_DIR, f"{pdb_id}_labels.csv")
+
+        # Collect ALL allosteric residues across all entries for this PDB
+        allosteric_set = set()
+        active_set = set()
+        for _, row in group.iterrows():
+            allo_res = parse_residue_list(row['allosteric_site_residue'])
+            allosteric_set.update(allo_res)
+            active_res = parse_active_site_residues(row['active_site_residue'])
+            active_set.update(active_res)
+
+        # Extract metadata from first row of group
+        group_metadata = {
+            'sequence': group.iloc[0]['sequence'] if 'sequence' in group.columns else '',
+            'organism': group.iloc[0]['organism'] if 'organism' in group.columns else '',
+            'target_gene': group.iloc[0]['target_gene'] if 'target_gene' in group.columns else '',
+        }
+
+        tasks.append((pdb_id, pdb_path, allosteric_set, active_set, group_metadata, output_path))
+
+    print(f"  Total tasks: {len(tasks)}")
+    # Use physical cores only; cap at 48
+    n_workers = min(max(1, cpu_count() - 2), 48)
+    print(f"  Workers: {n_workers}\n")
+
+    start_time = time.time()
     processed = 0
     skipped_no_pdb = 0
     skipped_parse_error = 0
     total_residues = 0
     total_allosteric = 0
     total_active = 0
-
     all_protein_summaries = []
 
-    for pdb_id, group in grouped:
-        pdb_id = pdb_id.strip().upper()
-        pdb_path = os.path.join(PDB_DIR, f"{pdb_id}.pdb")
-
-        if not os.path.exists(pdb_path):
-            skipped_no_pdb += 1
-            continue
-
-        residue_list = extract_residues_from_pdb(pdb_path)
-        if residue_list is None or len(residue_list) == 0:
-            skipped_parse_error += 1
-            continue
-
-        # Collect ALL allosteric residues across all entries for this PDB
-        all_allosteric = set()
-        all_active = set()
-
-        for _, row in group.iterrows():
-            allo_res = parse_residue_list(row['allosteric_site_residue'])
-            all_allosteric.update(allo_res)
-
-            active_res = parse_active_site_residues(row['active_site_residue'])
-            all_active.update(active_res)
-
-        # Create per-residue labels
-        records = []
-        for res in residue_list:
-            chain = res['chain']
-            resnum = res['resnum']
-            resname = res['resname']
-
-            is_allo = 1 if (chain, resnum) in all_allosteric else 0
-            # Active site: no chain info in AlloBench, match by resnum only (documented limitation)
-            is_active = 1 if resnum in all_active else 0
-
-            records.append({
-                'chain': chain,
-                'resnum': resnum,
-                'resname': resname,
-                'is_allosteric': is_allo,
-                'is_active_site': is_active
-            })
-
-        res_df = pd.DataFrame(records)
-
-        output_path = os.path.join(OUTPUT_DIR, f"{pdb_id}_labels.csv")
-        res_df.to_csv(output_path, index=False)
-
-        n_allo = res_df['is_allosteric'].sum()
-        n_active = res_df['is_active_site'].sum()
-        n_total = len(res_df)
-
-        total_residues += n_total
-        total_allosteric += n_allo
-        total_active += n_active
-
-        all_protein_summaries.append({
-            'pdb_id': pdb_id,
-            'n_residues': n_total,
-            'n_allosteric': n_allo,
-            'n_active_site': n_active,
-            'pct_allosteric': round(100 * n_allo / n_total, 1) if n_total > 0 else 0,
-            'sequence': group.iloc[0]['sequence'] if 'sequence' in group.columns else '',
-            'organism': group.iloc[0]['organism'] if 'organism' in group.columns else '',
-            'target_gene': group.iloc[0]['target_gene'] if 'target_gene' in group.columns else '',
-        })
-
-        processed += 1
-
-        if processed % 100 == 0:
-            print(f"  Processed {processed} structures...")
+    with Pool(processes=n_workers) as pool:
+        for result in pool.imap_unordered(process_single_protein, tasks, chunksize=4):
+            pdb_id, status, summary = result
+            if status == 'success':
+                processed += 1
+                all_protein_summaries.append(summary)
+                total_residues += summary['n_residues']
+                total_allosteric += summary['n_allosteric']
+                total_active += summary['n_active_site']
+                if processed % 100 == 0:
+                    elapsed = time.time() - start_time
+                    rate = processed / elapsed
+                    remaining = (len(tasks) - processed - skipped_no_pdb - skipped_parse_error) / max(rate, 0.01)
+                    print(f"  Processed {processed} structures ({elapsed:.0f}s, ~{remaining:.0f}s remaining)")
+            elif status == 'skipped_no_pdb':
+                skipped_no_pdb += 1
+            elif status == 'skipped_parse_error':
+                skipped_parse_error += 1
 
     # Save summary
     summary_df = pd.DataFrame(all_protein_summaries)
     summary_path = os.path.join(DATA_DIR, "processed", "dataset_summary.csv")
     summary_df.to_csv(summary_path, index=False)
 
+    elapsed = time.time() - start_time
     print(f"\n{'='*60}")
-    print(f"DONE")
+    print(f"DONE ({elapsed:.0f}s)")
     print(f"{'='*60}")
     print(f"  Processed:          {processed}")
     print(f"  Skipped (no PDB):   {skipped_no_pdb}")
