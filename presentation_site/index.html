@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Allosteric Site Prediction — Live Demo</title>
+<link rel="stylesheet" href="style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='10' fill='%236ee7ff'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%2305070b'/%3E%3C/svg%3E" />
+<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+</head>
+<body>
+<main class="app">
+  <aside class="sidebar">
+    <header class="brand">
+      <div class="brand-top">
+        <div class="dot"></div>
+        <span>Residue-level allosteric predictor</span>
+      </div>
+      <h1>Real site vs. model prediction</h1>
+      <p class="subtitle">Hassan AL Habeeb &nbsp;·&nbsp; Supervised by Dr. Mohammed Al Mohaini</p>
+      <p class="method-blurb">
+        XGBoost trained on <b>2,043</b> proteins with 225 structural, dynamic, pocket, and
+        ESM-2 language-model features per residue. Blind-tested on <b>2,370</b> independent
+        CASBench proteins across 91 enzyme families.
+      </p>
+      <a class="gh-link" href="https://github.com/Hassan-Alhabeeb/ResidueAllo" target="_blank" rel="noopener">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+        </svg>
+        <span>github.com/Hassan-Alhabeeb/ResidueAllo</span>
+      </a>
+    </header>
+
+    <section class="proteins">
+      <h2>Demo proteins</h2>
+      <div id="protein-list" class="list"></div>
+    </section>
+
+    <section class="legend">
+      <h2>Legend</h2>
+      <ul>
+        <li><span class="swatch tp"></span> True positive — real allosteric residue the model caught</li>
+        <li><span class="swatch fn"></span> False negative — real allosteric residue the model missed</li>
+        <li><span class="swatch fp"></span> False positive — model predicted, not real</li>
+        <li><span class="swatch act"></span> Active (catalytic) site</li>
+        <li><span class="swatch base"></span> Other residues</li>
+      </ul>
+    </section>
+  </aside>
+
+  <!-- Mobile-only compact header (hidden on desktop) -->
+  <div class="mobile-header">
+    <div class="mobile-top-row">
+      <div class="brand-top">
+        <div class="dot"></div>
+        <span>Real site vs. model prediction</span>
+      </div>
+      <a class="gh-link gh-mini" href="https://github.com/Hassan-Alhabeeb/ResidueAllo" target="_blank" rel="noopener" aria-label="GitHub repo">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+        </svg>
+      </a>
+    </div>
+    <div class="tabs-wrap">
+      <div id="mobile-tabs" class="tabs"></div>
+    </div>
+  </div>
+
+  <section class="stage">
+    <div class="viewer-wrap">
+      <div id="viewer"></div>
+      <div id="viewer-loading" class="loading">Loading structure…</div>
+    </div>
+
+    <div class="overlay overlay-top">
+      <div class="chip" id="chip-pdb">—</div>
+      <div class="chip chip-cat" id="chip-cat">—</div>
+      <div class="chip" id="chip-family">—</div>
+    </div>
+
+    <div class="mode-bar">
+      <button data-mode="both" class="active">Both</button>
+      <button data-mode="truth">Ground truth only</button>
+      <button data-mode="pred">Prediction only</button>
+      <button data-mode="prob">Probability heatmap</button>
+    </div>
+
+    <div class="narrative">
+      <h2 id="n-title">—</h2>
+      <p id="n-blurb">—</p>
+
+      <div class="stats stats-perf">
+        <div><span class="label">AUROC</span><span class="value" id="s-auroc">—</span></div>
+        <div><span class="label">AUPRC</span><span class="value" id="s-auprc">—</span></div>
+        <div><span class="label">Precision</span><span class="value" id="s-prec">—</span></div>
+        <div><span class="label">Recall</span><span class="value" id="s-recall">—</span></div>
+      </div>
+
+      <div class="stats stats-counts">
+        <div><span class="label">Residues</span><span class="value" id="s-res">—</span></div>
+        <div><span class="label">Real allosteric</span><span class="value" id="s-true">—</span></div>
+        <div><span class="label">Predicted positive</span><span class="value" id="s-pred">—</span></div>
+        <div><span class="label">TP</span><span class="value tp" id="s-tp">—</span></div>
+        <div><span class="label">FN (missed)</span><span class="value fn" id="s-fn">—</span></div>
+        <div><span class="label">FP</span><span class="value fp" id="s-fp">—</span></div>
+      </div>
+
+      <div class="threshold-note">Decision threshold = <span id="s-thr">—</span> (Optuna-tuned on validation)</div>
+
+      <div class="finding-callout">
+        <strong>Novel finding →</strong>
+        The model fails on allosteric sites located at flat protein-protein interfaces — a previously unreported blind
+        spot affecting all pocket-based predictors. Try <button class="inline-link" data-jump="1HQ6">1HQ6</button>
+        or <button class="inline-link" data-jump="3W8L">3W8L</button> to see it.
+      </div>
+
+      <div class="mobile-legend">
+        <span><span class="swatch tp"></span>caught</span>
+        <span><span class="swatch fn"></span>missed</span>
+        <span><span class="swatch fp"></span>wrong</span>
+        <span><span class="swatch act"></span>active</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="script.js"></script>
+</body>
+</html>

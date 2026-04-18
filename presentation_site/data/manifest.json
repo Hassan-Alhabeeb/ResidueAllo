@@ -1,0 +1,50 @@
+{
+  "threshold": 0.3429144024848938,
+  "proteins": [
+    {
+      "pdb_id": "1UU7",
+      "category": "win",
+      "family": "cas0003",
+      "title": "Clean win \u2014 model nails the allosteric pocket",
+      "blurb": "Phosphofructokinase-1 style regulation. High-AUROC case where pocket geometry, dynamics, and ESM-2 all agree on the regulatory site.",
+      "n_residues": 282,
+      "n_true_allosteric": 17
+    },
+    {
+      "pdb_id": "4KSQ",
+      "category": "win",
+      "family": "cas0012",
+      "title": "Kinase family \u2014 the clinically critical case",
+      "blurb": "Kinases are 35% of drug targets and the domain where allosteric inhibitors (e.g. asciminib for CML) are transforming therapy. Model correctly flags the allosteric pocket away from the ATP site.",
+      "n_residues": 513,
+      "n_true_allosteric": 64
+    },
+    {
+      "pdb_id": "3ME3",
+      "category": "win",
+      "family": "cas0044",
+      "title": "Generalization beyond the training distribution",
+      "blurb": "Test protein with <30% identity to anything in training. Strong prediction demonstrates the model learned structure-function patterns, not sequence memorization.",
+      "n_residues": 2037,
+      "n_true_allosteric": 108
+    },
+    {
+      "pdb_id": "1HQ6",
+      "category": "fail",
+      "family": "cas0074",
+      "title": "Interface allostery \u2014 the novel failure mode",
+      "blurb": "Allosteric site sits on a flat protein-protein interface. FPocket returns null features. Model defaults to the active-site pocket and gets it backwards (AUROC 0.25 \u2014 worse than random). This is the pocket-bias blind spot affecting the entire field.",
+      "n_residues": 1764,
+      "n_true_allosteric": 1
+    },
+    {
+      "pdb_id": "3W8L",
+      "category": "fail",
+      "family": "cas0014",
+      "title": "Second interface-allostery case \u2014 same blind spot",
+      "blurb": "Different enzyme family, same failure pattern. Any predictor relying on pocket geometry \u2014 and most in the literature do \u2014 shares this blind spot.",
+      "n_residues": 652,
+      "n_true_allosteric": 32
+    }
+  ]
+}
